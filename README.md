@@ -12,7 +12,7 @@ FancyZones is brilliant at arranging windows, especially on ultrawide monitors. 
 - **Games fit perfectly.** A game running windowed at the zone size gets the entire zone, with nothing cut off at the bottom, and it keeps its resolution when you switch layouts, so the picture is never cropped.
 - **Apps fill their zone** and follow along whenever you switch layouts.
 - **Stubborn windows are handled too.** Programs that insist on their title bar, or draw their own, get it tucked away above the top edge of the screen.
-- **It knows what to leave alone.** Browsers, File Explorer and other apps with tabs in their title bar keep it automatically, with no lists to maintain.
+- **It knows what to leave alone.** Browsers, File Explorer and other apps with tabs or buttons in their title bar keep it by default. Press the hotkey on one and its title bar goes too.
 - **One hotkey** (Ctrl+Alt+Shift+T) removes or restores the title bar of any window and remembers your choice for that app.
 - **All settings live in the tray menu**, including Start with Windows.
 - **Games that run as administrator** are supported with a single setting.
@@ -50,7 +50,7 @@ With both on, Start with Windows uses a scheduled task, the same way PowerToys d
 - Square corners (turns off Windows 11's rounded corners on borderless windows so they meet the zone edges)
 - Start with Windows
 - Run as administrator
-- Keep title bar for (every snapped app with a checkmark; tick an app to keep its title bar)
+- Keep title bar for (every snapped app; ticked apps keep their title bar, and clicking one switches it)
 - Open settings file, Open log, Exit
 
 A notification confirms every hotkey press, so you always know what happened.
@@ -61,7 +61,7 @@ FancyBorderless works entirely from the outside, using standard Windows APIs.
 
 - FancyZones marks every window it snaps with a window property (`FancyZones_zones`) holding the zone number. FancyBorderless reads that property to know which windows are snapped and where.
 - It reads FancyZones' layout files (`applied-layouts.json`, `custom-layouts.json`) and calculates the zone rectangles with the same integer math FancyZones uses, for custom layouts and built-in templates alike.
-- It tells a title bar Windows draws from one an app draws itself by comparing where the window's content starts with where the window starts. For apps that draw their own bar it asks the window what's near the top (`WM_NCHITTEST`, the same question Windows asks to know where a window can be dragged). A plain title bar answers "caption" across its whole width, while a tab strip doesn't.
+- It tells a title bar Windows draws from one an app draws itself by comparing where the window's content starts with where the window starts. For apps that draw their own bar it asks the window what's near the top (`WM_NCHITTEST`, the same question Windows asks to know where a window can be dragged). The answers show where the bar ends and what's in it: a plain title bar answers "caption" across its whole width, while tabs and buttons answer "content".
 - It changes windows with `SetWindowLongPtr` and `SetWindowPos`, listens for window events with an out-of-context `SetWinEventHook`, and uses `RegisterHotKey` for its shortcut.
 - It marks each window it changes with a property of its own, so even after an unexpected exit the next start recognizes those windows and can restore them.
 
@@ -81,7 +81,8 @@ Everything except the hotkey is in the tray menu. For manual tweaks, the file is
 |---|---|---|
 | `removeTitleBars` | `true` | Same as the tray menu item. |
 | `squareCorners` | `true` | Same as the tray menu item. |
-| `keepTitleBarApps` | `[]` | Apps that keep their title bar, by exe name (`MyApp.exe`; the `.exe` is optional). The hotkey and the tray menu edit this list. |
+| `keepTitleBarApps` | `[]` | Apps that keep their title bar, by exe name (`MyApp.exe`; the `.exe` is optional). |
+| `removeTitleBarApps` | `[]` | Apps that lose their title bar even when it has tabs or buttons in it. The hotkey and the tray menu edit both lists. |
 | `toggleTitleBarHotkey` | `Ctrl+Alt+Shift+T` | Modifiers plus a letter, digit, F1-F24, Numpad0-9 or a named key like `PageUp`. Empty disables it. |
 | `runAsAdministrator` | `false` | Same as the tray menu item. |
 

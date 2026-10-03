@@ -69,8 +69,8 @@ func (m *manager) onTrayMessage(event uint32) {
 	}
 }
 
-// menuApps lists the apps the "Keep title bar for" submenu offers: those already kept and
-// those with a snapped window that has a Windows title bar.
+// menuApps lists the apps the "Keep title bar for" submenu offers: those the user chose for
+// and those with a snapped window that has a title bar.
 func (m *manager) menuApps() []string {
 	seen := map[string]string{}
 	add := func(exeName string) {
@@ -79,7 +79,7 @@ func (m *manager) menuApps() []string {
 			seen[key] = exeName
 		}
 	}
-	for _, e := range m.cfg.KeepTitleBarApps {
+	for _, e := range slices.Concat(m.cfg.KeepTitleBarApps, m.cfg.RemoveTitleBarApps) {
 		add(strings.TrimSpace(e))
 	}
 	for h, w := range m.windows {
@@ -117,7 +117,7 @@ func (m *manager) showMenu() {
 		add(appsMenu, mfString|mfGrayed, 0, "Snap an app with FancyZones first")
 	}
 	for i, exeName := range apps {
-		add(appsMenu, checked(matchesApp(m.cfg.KeepTitleBarApps, exeName)), uintptr(menuFirstApp+i), displayName(exeName))
+		add(appsMenu, checked(m.appKeepsTitleBar(exeName)), uintptr(menuFirstApp+i), displayName(exeName))
 	}
 
 	add(menu, mfString|mfGrayed, 0, "FancyBorderless "+version)
@@ -159,6 +159,6 @@ func (m *manager) showMenu() {
 		procPostMessageW.Call(m.hwnd, wmClose, 0, 0)
 	case cmd >= menuFirstApp && int(cmd-menuFirstApp) < len(apps):
 		exeName := apps[cmd-menuFirstApp]
-		m.setKeep(exeName, !matchesApp(m.cfg.KeepTitleBarApps, exeName))
+		m.setKeep(exeName, !m.appKeepsTitleBar(exeName))
 	}
 }

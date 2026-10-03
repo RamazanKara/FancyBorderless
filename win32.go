@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"syscall"
 	"unsafe"
 )
@@ -28,6 +29,7 @@ var (
 	procGetAncestor                   = user32.NewProc("GetAncestor")
 	procGetClientRect                 = user32.NewProc("GetClientRect")
 	procGetCursorPos                  = user32.NewProc("GetCursorPos")
+	procGetDpiForWindow               = user32.NewProc("GetDpiForWindow")
 	procGetForegroundWindow           = user32.NewProc("GetForegroundWindow")
 	procGetMonitorInfoW               = user32.NewProc("GetMonitorInfoW")
 	procGetPropW                      = user32.NewProc("GetPropW")
@@ -139,6 +141,9 @@ const (
 	spiSetWorkArea  = 0x002F
 
 	htCaption       = 2
+	htMinButton     = 8
+	htMaxButton     = 9
+	htClose         = 20
 	smtoAbortIfHung = 0x0002
 	msgfltAllow     = 1
 
@@ -345,38 +350,53 @@ func hitTest(h uintptr, x, y int32) (uintptr, bool) {
 	return result, r != 0
 }
 
-// ownTitleBarHeight measures a title bar that an app draws itself: apps answer "caption" to
-// hitTest for it. One column finds where the bar ends; a few more confirm it ends at the same
-// height across the left half of the window, which a tab strip doesn't (tabs answer
-// "content"). Zero means none was found.
-func ownTitleBarHeight(h uintptr) int32 {
-	const maxBar, minBar = 80, 16
+// ownTitleBar measures a title bar that an app draws itself. Apps answer hitTest with
+// "caption" for its empty parts, so it usually ends where the caption in the middle ends.
+// When that is only a thin strip (or a tab), the close button tells, which apps that draw
+// their own answer with its button code. busy means the bar holds more than a title: tabs,
+// search boxes and other controls answer "content". A plain bar is caption all along its
+// bottom edge, from near the left to past the middle, while a browser's first tab always
+// starts within a few dozen pixels of the left. A height of zero means none was found.
+func ownTitleBar(h uintptr) (height int32, busy bool) {
+	maxBar, minBar := scaleForWindow(h, 80), scaleForWindow(h, 16)
 	r := visibleRect(h)
-	column := func(percent int32) int32 { return r.Left + r.width()*percent/100 }
-	x := column(45)
-	bottom := int32(-1)
-	for y := int32(0); y < maxBar; y++ {
-		hit, ok := hitTest(h, x, r.Top+y)
-		if !ok {
-			return 0
+	lowest := func(x int32, codes ...uintptr) (int32, bool) {
+		bottom := int32(-1)
+		for y := int32(0); y < maxBar; y++ {
+			hit, ok := hitTest(h, x, r.Top+y)
+			if !ok {
+				return 0, false
+			}
+			if slices.Contains(codes, hit) {
+				bottom = y
+			}
 		}
-		if hit == htCaption {
-			bottom = y
+		return bottom + 1, true
+	}
+	height, ok := lowest(r.Left+r.width()*45/100, htCaption)
+	if ok && height < minBar {
+		height, ok = lowest(r.Right-scaleForWindow(h, 20), htMinButton, htMaxButton, htClose)
+	}
+	if !ok || height < minBar {
+		return 0, false
+	}
+	columns := []int32{r.Left + r.width()*15/100, r.Left + r.width()*30/100, r.Left + r.width()*60/100}
+	for _, px := range []int32{60, 120, 180, 240} {
+		if x := scaleForWindow(h, px); x < r.width()/2 {
+			columns = append(columns, r.Left+x)
 		}
 	}
-	height := bottom + 1
-	if height < minBar {
-		return 0
-	}
-	for _, percent := range []int32{15, 30, 60} {
-		x := column(percent)
+	for _, x := range columns {
 		last, ok1 := hitTest(h, x, r.Top+height-1)
 		below, ok2 := hitTest(h, x, r.Top+height)
-		if !ok1 || !ok2 || last != htCaption || below == htCaption {
-			return 0
+		if !ok1 || !ok2 {
+			return 0, false
+		}
+		if last != htCaption || below == htCaption {
+			return height, true
 		}
 	}
-	return height
+	return height, false
 }
 
 // visibleRect is the window as drawn, without the invisible resize borders that framed
@@ -398,6 +418,15 @@ func isCloaked(h uintptr) bool {
 
 func setCornerPreference(h uintptr, pref uint32) {
 	procDwmSetWindowAttribute.Call(h, dwmwaWindowCornerPreference, uintptr(unsafe.Pointer(&pref)), unsafe.Sizeof(pref))
+}
+
+// scaleForWindow converts a size in pixels at 100 % scaling to the window's monitor.
+func scaleForWindow(h uintptr, px int32) int32 {
+	dpi, _, _ := procGetDpiForWindow.Call(h)
+	if dpi == 0 {
+		return px
+	}
+	return px * int32(dpi) / 96
 }
 
 func setWindowPos(h uintptr, r rect, flags uintptr) error {

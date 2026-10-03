@@ -14,9 +14,12 @@ import (
 // The tray menu and the hotkey edit this file; editing it by hand works too and takes effect
 // as soon as it's saved.
 type config struct {
-	RemoveTitleBars      bool     `json:"removeTitleBars"`
-	SquareCorners        bool     `json:"squareCorners"`
+	RemoveTitleBars bool `json:"removeTitleBars"`
+	SquareCorners   bool `json:"squareCorners"`
+	// The user's choices per app. Apps in neither list lose their title bar unless it has
+	// tabs or buttons in it, like a browser's.
 	KeepTitleBarApps     []string `json:"keepTitleBarApps"`
+	RemoveTitleBarApps   []string `json:"removeTitleBarApps"`
 	ToggleTitleBarHotkey string   `json:"toggleTitleBarHotkey"`
 	// RunAsAdministrator is needed for games that run as administrator: Windows doesn't let
 	// a normal program move or restyle their windows.
@@ -25,9 +28,10 @@ type config struct {
 
 func defaultConfig() config {
 	return config{
-		RemoveTitleBars:  true,
-		SquareCorners:    true,
-		KeepTitleBarApps: []string{},
+		RemoveTitleBars:    true,
+		SquareCorners:      true,
+		KeepTitleBarApps:   []string{},
+		RemoveTitleBarApps: []string{},
 		// Shift is included because Ctrl+Alt+<key> is AltGr+<key> on many keyboard layouts.
 		ToggleTitleBarHotkey: "Ctrl+Alt+Shift+T",
 	}
@@ -51,6 +55,9 @@ func loadConfig() (config, error) {
 	}
 	if c.KeepTitleBarApps == nil {
 		c.KeepTitleBarApps = []string{}
+	}
+	if c.RemoveTitleBarApps == nil {
+		c.RemoveTitleBarApps = []string{}
 	}
 	return c, nil
 }
