@@ -48,6 +48,7 @@ var (
 	procRegisterClassExW              = user32.NewProc("RegisterClassExW")
 	procRegisterHotKey                = user32.NewProc("RegisterHotKey")
 	procRegisterWindowMessageW        = user32.NewProc("RegisterWindowMessageW")
+	procSendMessageTimeoutW           = user32.NewProc("SendMessageTimeoutW")
 	procSetForegroundWindow           = user32.NewProc("SetForegroundWindow")
 	procSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
 	procSetTimer                      = user32.NewProc("SetTimer")
@@ -123,12 +124,16 @@ const (
 	wmSettingChange = 0x001A
 	wmContextMenu   = 0x007B
 	wmDisplayChange = 0x007E
+	wmNcHitTest     = 0x0084
 	wmTimer         = 0x0113
 	wmHotkey        = 0x0312
-	wmLButtonDblClk = 0x0203
+	wmLButtonUp     = 0x0202
 	wmRButtonUp     = 0x0205
 	wmApp           = 0x8000
 	spiSetWorkArea  = 0x002F
+
+	htCaption       = 2
+	smtoAbortIfHung = 0x0002
 
 	modAlt      = 0x0001
 	modControl  = 0x0002
@@ -142,10 +147,15 @@ const (
 	nifMessage = 0x1
 	nifIcon    = 0x2
 	nifTip     = 0x4
+	nifInfo    = 0x10
+
+	niifInfo    = 0x1
+	niifNoSound = 0x10
 
 	mfString    = 0x0000
 	mfGrayed    = 0x0001
 	mfChecked   = 0x0008
+	mfPopup     = 0x0010
 	mfSeparator = 0x0800
 
 	tpmRightButton = 0x0002
@@ -299,6 +309,53 @@ func clientScreenRect(h uintptr) rect {
 	procClientToScreen.Call(h, uintptr(unsafe.Pointer(&origin)))
 	w, ht := clientSize(h)
 	return rect{origin.X, origin.Y, origin.X + w, origin.Y + ht}
+}
+
+// drawsTitleBar reports whether Windows draws a title bar above the window's content.
+// Browsers, Explorer and most modern apps set the caption style but draw their own bar
+// inside their content, so their content starts at the very top of the window.
+func drawsTitleBar(h uintptr) bool {
+	const minTitleBar = 8
+	return windowStyle(h)&wsCaption == wsCaption && clientScreenRect(h).Top-visibleRect(h).Top > minTitleBar
+}
+
+// hitTest asks the window what is at a screen point, the question Windows asks to know where
+// a window can be dragged. It has no side effects.
+func hitTest(h uintptr, x, y int32) (uintptr, bool) {
+	var result uintptr
+	lParam := uintptr(uint16(y))<<16 | uintptr(uint16(x))
+	r, _, _ := procSendMessageTimeoutW.Call(h, wmNcHitTest, 0, lParam, smtoAbortIfHung, 100, uintptr(unsafe.Pointer(&result)))
+	return result, r != 0
+}
+
+// ownTitleBarHeight measures a title bar that an app draws itself: apps answer "caption" to
+// hitTest for it. A tab strip answers "caption" only between the tabs, so the bar has to end
+// at the same height across the left half of the window to count. Zero means none was found.
+func ownTitleBarHeight(h uintptr) int32 {
+	const maxBar, minBar = 80, 16
+	r := visibleRect(h)
+	height := int32(-1)
+	for _, percent := range []int32{15, 30, 45, 60} {
+		x := r.Left + r.width()*percent/100
+		bottom := int32(-1)
+		for y := int32(0); y < maxBar; y++ {
+			hit, ok := hitTest(h, x, r.Top+y)
+			if !ok {
+				return 0
+			}
+			if hit == htCaption {
+				bottom = y
+			}
+		}
+		if bottom < 0 || (height >= 0 && bottom+1 != height) {
+			return 0
+		}
+		height = bottom + 1
+	}
+	if height < minBar {
+		return 0
+	}
+	return height
 }
 
 // visibleRect is the window as drawn, without the invisible resize borders that framed

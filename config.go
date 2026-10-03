@@ -11,24 +11,20 @@ import (
 	"strings"
 )
 
+// The tray menu and the hotkey edit this file; editing it by hand works too and takes effect
+// as soon as it's saved.
 type config struct {
-	// RemoveTitleBars turns the whole tool on or off without exiting it.
-	RemoveTitleBars bool `json:"removeTitleBars"`
-	// OnlyApps, when not empty, limits title bar removal to these programs.
-	OnlyApps []string `json:"onlyApps"`
-	// KeepTitleBarApps are never touched.
-	KeepTitleBarApps     []string `json:"keepTitleBarApps"`
+	RemoveTitleBars      bool     `json:"removeTitleBars"`
 	SquareCorners        bool     `json:"squareCorners"`
+	KeepTitleBarApps     []string `json:"keepTitleBarApps"`
 	ToggleTitleBarHotkey string   `json:"toggleTitleBarHotkey"`
 }
 
 func defaultConfig() config {
 	return config{
-		RemoveTitleBars: true,
-		OnlyApps:        []string{},
-		// These draw tabs or other controls into their title bar.
-		KeepTitleBarApps: []string{"explorer.exe", "firefox.exe", "chrome.exe", "msedge.exe", "brave.exe", "WindowsTerminal.exe"},
+		RemoveTitleBars:  true,
 		SquareCorners:    true,
+		KeepTitleBarApps: []string{},
 		// Shift is included because Ctrl+Alt+<key> is AltGr+<key> on many keyboard layouts.
 		ToggleTitleBarHotkey: "Ctrl+Alt+Shift+T",
 	}
@@ -49,6 +45,9 @@ func loadConfig() (config, error) {
 	}
 	if err != nil {
 		return defaultConfig(), err
+	}
+	if c.KeepTitleBarApps == nil {
+		c.KeepTitleBarApps = []string{}
 	}
 	return c, nil
 }
@@ -98,6 +97,14 @@ func matchesApp(list []string, exePath string) bool {
 		}
 	}
 	return false
+}
+
+// displayName turns "Plex.exe" into "Plex" for menus and notifications.
+func displayName(exeName string) string {
+	if strings.HasSuffix(strings.ToLower(exeName), ".exe") {
+		return exeName[:len(exeName)-len(".exe")]
+	}
+	return exeName
 }
 
 var namedKeys = map[string]uint32{

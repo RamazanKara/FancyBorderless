@@ -28,6 +28,11 @@ const (
 
 type window struct {
 	exe string
+	// titleBar: Windows draws a title bar above the window's content.
+	titleBar bool
+	// ownBar: height of a plain title bar the app draws itself (WPF and UWP apps, for example).
+	// Browsers draw tabs there instead and get 0, so they're left alone.
+	ownBar int32
 	// fixedSize: the window had no resize border of its own. FancyZones never resizes such
 	// windows and neither do we; games in windowed mode are usually like this, and most of
 	// them keep drawing at their resolution, so a smaller window would cut the picture off.
@@ -37,9 +42,8 @@ type window struct {
 	stripped    bool // title bar and border removed by us
 	strippedAt  time.Time
 	refusals    int  // times the program put its frame back right away
-	offset      bool // the program insists on its frame; its title bar is hidden above the screen
+	offset      bool // title bar kept but hidden above the screen (enforced frame, or the app's own bar)
 	squared     bool // rounded corners turned off by us
-	keepFrame   bool // title bar brought back with the hotkey
 	manual      bool // title bar removed with the hotkey on a window that isn't snapped
 	broken      bool // Windows refused a change, usually because the window runs elevated
 	gaveUp      bool
@@ -60,7 +64,6 @@ type manager struct {
 	due      map[uintptr]time.Time
 	reported map[string]bool
 	hooks    []uintptr
-	paused   bool
 }
 
 func newManager() *manager {
@@ -193,11 +196,27 @@ func (m *manager) reloadConfig() {
 		log.Printf("settings: %v; using the defaults", err)
 		beep()
 	}
+	old := m.cfg
 	m.cfg = cfg
 	m.cfgStamp = fileStamp(configPath)
 	m.registerHotkeys()
+	if old.SquareCorners != cfg.SquareCorners {
+		m.applyCorners()
+	}
+	if old.RemoveTitleBars && !cfg.RemoveTitleBars {
+		m.restoreAll("turned off")
+	}
 	m.refitAll()
+	m.updateTrayIcon()
 	log.Print("settings loaded")
+}
+
+func (m *manager) saveConfig() {
+	if err := writeJSON(configPath, m.cfg); err != nil {
+		log.Printf("saving settings: %v", err)
+		return
+	}
+	m.cfgStamp = fileStamp(configPath)
 }
 
 // refitAll re-evaluates every handled window with a fresh change budget.
@@ -214,17 +233,14 @@ func (m *manager) evaluate(h uintptr) {
 		delete(m.windows, h)
 		return
 	}
-	if m.paused || !m.isCandidate(h) {
+	if !m.cfg.RemoveTitleBars || !m.isCandidate(h) {
 		return
 	}
 	w := m.windows[h]
 	bits := zoneBits(h)
 	if bits == 0 {
-		if w != nil && w.stripped && !w.manual {
-			m.restore(h, w, "left its zone")
-		}
-		if w != nil && w.offset {
-			bringTitleBarBack(h)
+		if w != nil && !w.manual {
+			m.showTitleBar(h, w, "left its zone")
 		}
 		return
 	}
@@ -246,28 +262,33 @@ func (m *manager) isCandidate(h uintptr) bool {
 	return !isCloaked(h) && windowPID(h) != m.ownPID
 }
 
-// track is called the first time a window is seen snapped, while it still has its own frame.
+// track measures a window the first time it's seen, while it still has its own frame.
 func (m *manager) track(h uintptr) *window {
 	w := &window{
 		exe:       processPath(windowPID(h)),
+		titleBar:  drawsTitleBar(h),
 		fixedSize: windowStyle(h)&wsThickFrame == 0,
+	}
+	if !w.titleBar {
+		// An app's own bar is part of its content and can't be removed, only hidden above
+		// the screen.
+		w.ownBar = ownTitleBarHeight(h)
+		w.offset = w.ownBar > 0
+		if w.offset {
+			log.Printf("%s draws its own %d px title bar; hiding it above the screen", m.describe(h, w), w.ownBar)
+		}
 	}
 	m.windows[h] = w
 	return w
 }
 
 func (m *manager) wantsBorderless(w *window) bool {
-	if !m.cfg.RemoveTitleBars || w.keepFrame || matchesApp(m.cfg.KeepTitleBarApps, w.exe) {
-		return false
-	}
-	return len(m.cfg.OnlyApps) == 0 || matchesApp(m.cfg.OnlyApps, w.exe)
+	return m.cfg.RemoveTitleBars && (w.titleBar || w.ownBar > 0) && !matchesApp(m.cfg.KeepTitleBarApps, w.exe)
 }
 
 func (m *manager) handleSnapped(h uintptr, w *window, bits uint64) {
 	if !m.wantsBorderless(w) {
-		if w.stripped {
-			m.restore(h, w, "excluded in the settings")
-		}
+		m.showTitleBar(h, w, "kept")
 		return
 	}
 	style := windowStyle(h)
@@ -330,26 +351,42 @@ func (m *manager) noteRefusal(h uintptr, w *window) {
 	log.Printf("%s keeps putting its title bar back; hiding it above the screen instead", m.describe(h, w))
 }
 
-// placeClient leaves the frame on and moves the window so its client area covers the zone
-// and the frame sticks out around it. In a zone along the top of the monitor the title bar
-// ends up above the screen, out of sight.
+// placeClient keeps the title bar and moves the window so the content below it covers the
+// zone, with the frame sticking out around it. In a zone along the top of the monitor the
+// title bar ends up above the screen, out of sight.
 func (m *manager) placeClient(h uintptr, w *window, zone rect) {
 	mi, ok := monitorInfo(monitorFromWindow(h))
 	if !ok || zone.Top != mi.Monitor.Top {
 		m.reportOnce(fmt.Sprintf("offset:%x", h), "%s: its title bar can only be hidden in zones along the top of the screen", m.describe(h, w))
 		return
 	}
-	win, client := windowRect(h), clientScreenRect(h)
+	win, content := windowRect(h), contentRect(h, w)
 	target := zone
 	if w.fixedSize {
-		target = rect{zone.Left, zone.Top, zone.Left + client.width(), zone.Top + client.height()}
+		target = rect{zone.Left, zone.Top, zone.Left + content.width(), zone.Top + content.height()}
 	}
 	m.fit(h, w, rect{
-		Left:   target.Left - (client.Left - win.Left),
-		Top:    target.Top - (client.Top - win.Top),
-		Right:  target.Right + (win.Right - client.Right),
-		Bottom: target.Bottom + (win.Bottom - client.Bottom),
+		Left:   target.Left - (content.Left - win.Left),
+		Top:    target.Top - (content.Top - win.Top),
+		Right:  target.Right + (win.Right - content.Right),
+		Bottom: target.Bottom + (win.Bottom - content.Bottom),
 	})
+}
+
+// contentRect is the part of the window below its title bar, in screen coordinates.
+func contentRect(h uintptr, w *window) rect {
+	if w.ownBar > 0 {
+		r := visibleRect(h)
+		r.Top += w.ownBar
+		return r
+	}
+	return clientScreenRect(h)
+}
+
+// titleBarAboveScreen reports whether a window's top edge is above its monitor's work area.
+func titleBarAboveScreen(h uintptr) bool {
+	mi, ok := monitorInfo(monitorFromWindow(h))
+	return ok && windowRect(h).Top < mi.Work.Top
 }
 
 // bringTitleBarBack moves a window down if its title bar is above the screen.
@@ -464,6 +501,27 @@ func (m *manager) fit(h uintptr, w *window, target rect) {
 	}
 }
 
+// showTitleBar undoes whatever we did to the window's title bar.
+func (m *manager) showTitleBar(h uintptr, w *window, why string) {
+	if w.stripped {
+		m.restore(h, w, why)
+	}
+	if !w.offset || !titleBarAboveScreen(h) {
+		return
+	}
+	// A resizable window that is still snapped goes back to exactly its zone; anything else
+	// is just moved down so its title bar is on screen again.
+	if bits := zoneBits(h); bits != 0 && !w.fixedSize {
+		if zone, ok := m.zoneRect(h, bits); ok {
+			if err := setVisibleRect(h, zone); err != nil {
+				log.Printf("%s: %v", m.describe(h, w), err)
+			}
+			return
+		}
+	}
+	bringTitleBarBack(h)
+}
+
 func (m *manager) restore(h uintptr, w *window, why string) {
 	visible := windowRect(h)
 	style := windowStyle(h) | w.origStyle&frameStyles
@@ -485,14 +543,8 @@ func (m *manager) restore(h uintptr, w *window, why string) {
 
 func (m *manager) restoreAll(why string) {
 	for h, w := range m.windows {
-		if !isWindow(h) {
-			continue
-		}
-		if w.stripped {
-			m.restore(h, w, why)
-		}
-		if w.offset {
-			bringTitleBarBack(h)
+		if isWindow(h) {
+			m.showTitleBar(h, w, why)
 		}
 	}
 }
@@ -502,16 +554,51 @@ func (m *manager) markBroken(h uintptr, w *window, action string, err error) {
 	log.Printf("%s: Windows refused %s (%v). If it runs as administrator, FancyBorderless has to as well.", m.describe(h, w), action, err)
 }
 
-func (m *manager) setPaused(paused bool) {
-	m.paused = paused
-	if paused {
-		m.restoreAll("paused")
-	} else {
+func (m *manager) setEnabled(on bool) {
+	m.cfg.RemoveTitleBars = on
+	m.saveConfig()
+	if on {
 		m.refitAll()
 		m.scan()
+	} else {
+		m.restoreAll("turned off")
 	}
 	m.updateTrayIcon()
-	log.Printf("paused: %v", paused)
+}
+
+func (m *manager) setSquareCorners(on bool) {
+	m.cfg.SquareCorners = on
+	m.saveConfig()
+	m.applyCorners()
+}
+
+func (m *manager) applyCorners() {
+	pref := uint32(dwmwcpDefault)
+	if m.cfg.SquareCorners {
+		pref = dwmwcpDoNotRound
+	}
+	for h, w := range m.windows {
+		if w.stripped && isWindow(h) {
+			setCornerPreference(h, pref)
+			w.squared = m.cfg.SquareCorners
+		}
+	}
+}
+
+// setKeep remembers whether an app keeps its title bar and applies it to its open windows.
+func (m *manager) setKeep(exeName string, keep bool) {
+	list := []string{}
+	for _, e := range m.cfg.KeepTitleBarApps {
+		if !matchesApp([]string{e}, exeName) {
+			list = append(list, e)
+		}
+	}
+	if keep {
+		list = append(list, exeName)
+	}
+	m.cfg.KeepTitleBarApps = list
+	m.saveConfig()
+	m.refitAll()
 }
 
 func (m *manager) registerHotkeys() {
@@ -530,33 +617,62 @@ func (m *manager) registerHotkeys() {
 	}
 }
 
-// toggleTitleBar flips the title bar of the focused window. On a snapped window the choice
-// sticks until the window closes.
+// toggleTitleBar hides or shows the title bar of the window in front. The choice is
+// remembered for the app, so its other windows and later ones follow it.
 func (m *manager) toggleTitleBar() {
 	h := rootWindow(foregroundWindow())
-	if m.paused || h == 0 || h == m.hwnd {
+	if h == 0 || !m.isCandidate(h) {
+		return
+	}
+	if !m.cfg.RemoveTitleBars {
+		m.notify("FancyBorderless is turned off. Turn on \"Remove title bars\" in its tray menu.")
 		return
 	}
 	w := m.windows[h]
 	if w == nil {
 		w = m.track(h)
 	}
+	if w.exe == "" {
+		beep()
+		return
+	}
+	exeName := filepath.Base(w.exe)
+	name := displayName(exeName)
 	w.broken, w.changes, w.gaveUp = false, nil, false
+
+	if w.stripped || (w.offset && titleBarAboveScreen(h)) {
+		m.setKeep(exeName, true)
+		m.showTitleBar(h, w, "hotkey")
+		m.notify(name + " keeps its title bar.")
+		return
+	}
+	if !w.titleBar && w.ownBar == 0 {
+		m.notify(name + " draws its own title bar with controls in it, so FancyBorderless leaves it alone.")
+		return
+	}
+	m.setKeep(exeName, false)
+	bits := zoneBits(h)
 	switch {
-	case w.stripped:
-		w.keepFrame = true
-		m.restore(h, w, "hotkey")
-	case w.offset && !w.keepFrame:
-		w.keepFrame = true
-		bringTitleBarBack(h)
-		log.Printf("%s: title bar shown (hotkey)", m.describe(h, w))
-	case zoneBits(h) != 0:
-		w.keepFrame = false
-		m.evaluate(h)
-	default:
+	case bits != 0:
+		m.handleSnapped(h, w, bits)
+	case w.titleBar:
 		if m.strip(h, w, visibleRect(h)) {
 			w.manual = true
 		}
+	}
+	switch {
+	case w.stripped:
+		m.notify(name + ": title bar removed.")
+	case w.offset && titleBarAboveScreen(h):
+		m.notify(name + ": title bar hidden above the screen.")
+	case w.broken:
+		m.notify("Windows refused to change " + name + ". If it runs as administrator, FancyBorderless has to as well.")
+	case w.ownBar > 0 && bits == 0:
+		m.notify("Snap " + name + " into a zone along the top of the screen to hide its title bar.")
+	case w.offset:
+		m.notify(name + "'s title bar can only be hidden in zones along the top of the screen.")
+	default:
+		m.notify("Couldn't remove the title bar of " + name + ". The log has details.")
 	}
 }
 

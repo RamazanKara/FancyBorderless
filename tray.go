@@ -1,6 +1,10 @@
 package main
 
 import (
+	"log"
+	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -8,24 +12,30 @@ import (
 const wmTrayIcon = wmApp + 1
 
 const (
-	menuPause = iota + 1
-	menuReload
+	menuEnabled = iota + 1
+	menuSquareCorners
+	menuStartup
 	menuSettings
 	menuLog
 	menuExit
+	menuFirstApp = 100
 )
 
 func (m *manager) trayData(flags uint32) *notifyIconData {
 	nid := &notifyIconData{Wnd: m.hwnd, ID: 1, Flags: flags, CallbackMessage: wmTrayIcon, Icon: m.icon}
 	nid.Size = uint32(unsafe.Sizeof(*nid))
 	tip := "FancyBorderless"
-	if m.paused {
-		tip += " (paused)"
+	if !m.cfg.RemoveTitleBars {
+		tip += " (off)"
 	}
-	if t, err := syscall.UTF16FromString(tip); err == nil {
-		copy(nid.Tip[:len(nid.Tip)-1], t)
-	}
+	copyUTF16(nid.Tip[:], tip)
 	return nid
+}
+
+func copyUTF16(dst []uint16, s string) {
+	if t, err := syscall.UTF16FromString(s); err == nil {
+		copy(dst[:len(dst)-1], t)
+	}
 }
 
 func (m *manager) addTrayIcon() {
@@ -40,13 +50,48 @@ func (m *manager) removeTrayIcon() {
 	procShellNotifyIconW.Call(nimDelete, uintptr(unsafe.Pointer(m.trayData(0))))
 }
 
+// notify shows a short Windows notification from the tray icon, so hotkey presses always get
+// visible feedback.
+func (m *manager) notify(text string) {
+	nid := m.trayData(nifInfo)
+	copyUTF16(nid.Info[:], text)
+	copyUTF16(nid.InfoTitle[:], "FancyBorderless")
+	nid.InfoFlags = niifInfo | niifNoSound
+	procShellNotifyIconW.Call(nimModify, uintptr(unsafe.Pointer(nid)))
+	log.Print(text)
+}
+
 func (m *manager) onTrayMessage(event uint32) {
 	switch event {
-	case wmRButtonUp, wmContextMenu:
+	case wmLButtonUp, wmRButtonUp, wmContextMenu:
 		m.showMenu()
-	case wmLButtonDblClk:
-		openFile(configPath)
 	}
+}
+
+// menuApps lists the apps the "Keep title bar for" submenu offers: those already kept and
+// those with a snapped window that has a Windows title bar.
+func (m *manager) menuApps() []string {
+	seen := map[string]string{}
+	add := func(exeName string) {
+		key := strings.ToLower(displayName(exeName))
+		if key != "" && seen[key] == "" {
+			seen[key] = exeName
+		}
+	}
+	for _, e := range m.cfg.KeepTitleBarApps {
+		add(strings.TrimSpace(e))
+	}
+	for h, w := range m.windows {
+		if (w.titleBar || w.ownBar > 0) && w.exe != "" && isWindow(h) {
+			add(filepath.Base(w.exe))
+		}
+	}
+	apps := make([]string, 0, len(seen))
+	for _, exeName := range seen {
+		apps = append(apps, exeName)
+	}
+	slices.SortFunc(apps, func(a, b string) int { return strings.Compare(strings.ToLower(a), strings.ToLower(b)) })
+	return apps
 }
 
 func (m *manager) showMenu() {
@@ -55,21 +100,36 @@ func (m *manager) showMenu() {
 		return
 	}
 	defer procDestroyMenu.Call(menu)
-	add := func(flags uint32, id int, text string) {
-		procAppendMenuW.Call(menu, uintptr(flags), uintptr(id), uintptr(unsafe.Pointer(utf16Ptr(text))))
+	add := func(menu uintptr, flags uint32, id uintptr, text string) {
+		procAppendMenuW.Call(menu, uintptr(flags), id, uintptr(unsafe.Pointer(utf16Ptr(text))))
 	}
-	pause := uint32(mfString)
-	if m.paused {
-		pause |= mfChecked
+	checked := func(on bool) uint32 {
+		if on {
+			return mfString | mfChecked
+		}
+		return mfString
 	}
-	add(mfString|mfGrayed, 0, "FancyBorderless "+version)
-	add(mfSeparator, 0, "")
-	add(pause, menuPause, "Paused")
-	add(mfString, menuReload, "Reload settings and layouts")
-	add(mfString, menuSettings, "Open settings file")
-	add(mfString, menuLog, "Open log")
-	add(mfSeparator, 0, "")
-	add(mfString, menuExit, "Exit")
+
+	apps := m.menuApps()
+	appsMenu, _, _ := procCreatePopupMenu.Call()
+	if len(apps) == 0 {
+		add(appsMenu, mfString|mfGrayed, 0, "Snap an app with FancyZones first")
+	}
+	for i, exeName := range apps {
+		add(appsMenu, checked(matchesApp(m.cfg.KeepTitleBarApps, exeName)), uintptr(menuFirstApp+i), displayName(exeName))
+	}
+
+	add(menu, mfString|mfGrayed, 0, "FancyBorderless "+version)
+	add(menu, mfSeparator, 0, "")
+	add(menu, checked(m.cfg.RemoveTitleBars), menuEnabled, "Remove title bars")
+	add(menu, checked(m.cfg.SquareCorners), menuSquareCorners, "Square corners")
+	add(menu, checked(startsWithWindows()), menuStartup, "Start with Windows")
+	add(menu, mfPopup, appsMenu, "Keep title bar for") // the menu owns and destroys appsMenu
+	add(menu, mfSeparator, 0, "")
+	add(menu, mfString, menuSettings, "Open settings file")
+	add(menu, mfString, menuLog, "Open log")
+	add(menu, mfSeparator, 0, "")
+	add(menu, mfString, menuExit, "Exit")
 
 	var pt point
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
@@ -80,17 +140,23 @@ func (m *manager) showMenu() {
 	cmd, _, _ := procTrackPopupMenu.Call(menu, tpmReturnCmd|tpmRightButton|tpmNoNotify, uintptr(pt.X), uintptr(pt.Y), 0, m.hwnd, 0)
 	procPostMessageW.Call(m.hwnd, wmNull, 0, 0)
 
-	switch cmd {
-	case menuPause:
-		m.setPaused(!m.paused)
-	case menuReload:
-		m.cfgStamp, m.fzStamp = "", ""
-		m.scan()
-	case menuSettings:
+	switch {
+	case cmd == menuEnabled:
+		m.setEnabled(!m.cfg.RemoveTitleBars)
+	case cmd == menuSquareCorners:
+		m.setSquareCorners(!m.cfg.SquareCorners)
+	case cmd == menuStartup:
+		if err := setStartWithWindows(!startsWithWindows()); err != nil {
+			m.notify("Couldn't change Start with Windows: " + err.Error())
+		}
+	case cmd == menuSettings:
 		openFile(configPath)
-	case menuLog:
+	case cmd == menuLog:
 		openFile(logPath)
-	case menuExit:
+	case cmd == menuExit:
 		procPostMessageW.Call(m.hwnd, wmClose, 0, 0)
+	case cmd >= menuFirstApp && int(cmd-menuFirstApp) < len(apps):
+		exeName := apps[cmd-menuFirstApp]
+		m.setKeep(exeName, !matchesApp(m.cfg.KeepTitleBarApps, exeName))
 	}
 }

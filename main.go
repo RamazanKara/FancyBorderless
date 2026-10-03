@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	version     = "1.0.0"
+	version     = "1.1.0"
 	windowClass = "FancyBorderless"
 )
 
@@ -225,9 +225,17 @@ func list() int {
 		}
 		exe := processPath(windowPID(h))
 		style := windowStyle(h)
-		fmt.Printf("  %s %q zone %s\n    window %v, visible %v, title bar %v, resize border %v, popup %v\n",
+		titleBar := "drawn by Windows"
+		if !drawsTitleBar(h) {
+			if bar := ownTitleBarHeight(h); bar > 0 {
+				titleBar = fmt.Sprintf("drawn by the app, %d px", bar)
+			} else {
+				titleBar = "none, or the app's own with controls in it"
+			}
+		}
+		fmt.Printf("  %s %q zone %s\n    window %v, visible %v, resize border %v, popup %v\n    title bar: %s\n",
 			filepath.Base(exe), windowTitle(h), zoneList(bits), windowRect(h), visibleRect(h),
-			style&wsCaption == wsCaption, style&wsThickFrame != 0, style&wsPopup != 0)
+			style&wsThickFrame != 0, style&wsPopup != 0, titleBar)
 	}
 	return 0
 }
