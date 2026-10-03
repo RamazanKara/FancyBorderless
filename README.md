@@ -120,3 +120,7 @@ Bug reports, ideas and pull requests are welcome. If a window doesn't behave as 
 MIT. See [LICENSE](LICENSE).
 
 FancyBorderless is an independent project and isn't affiliated with or endorsed by Microsoft. FancyZones and PowerToys are Microsoft's.
+
+## Disclaimer
+
+AI was used for parts of the Code in this project.
