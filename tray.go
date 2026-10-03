@@ -13,7 +13,6 @@ const wmTrayIcon = wmApp + 1
 
 const (
 	menuEnabled = iota + 1
-	menuSquareCorners
 	menuStartup
 	menuAdmin
 	menuSettings
@@ -123,7 +122,6 @@ func (m *manager) showMenu() {
 	add(menu, mfString|mfGrayed, 0, "FancyBorderless "+version)
 	add(menu, mfSeparator, 0, "")
 	add(menu, checked(m.cfg.RemoveTitleBars), menuEnabled, "Remove title bars")
-	add(menu, checked(m.cfg.SquareCorners), menuSquareCorners, "Square corners")
 	add(menu, checked(startsWithWindows()), menuStartup, "Start with Windows")
 	add(menu, checked(m.cfg.RunAsAdministrator), menuAdmin, "Run as administrator")
 	add(menu, mfPopup, appsMenu, "Keep title bar for") // the menu owns and destroys appsMenu
@@ -145,8 +143,6 @@ func (m *manager) showMenu() {
 	switch {
 	case cmd == menuEnabled:
 		m.setEnabled(!m.cfg.RemoveTitleBars)
-	case cmd == menuSquareCorners:
-		m.setSquareCorners(!m.cfg.SquareCorners)
 	case cmd == menuStartup:
 		m.toggleStartWithWindows()
 	case cmd == menuAdmin:

@@ -47,7 +47,6 @@ type window struct {
 	strippedAt  time.Time
 	refusals    int  // times the program put its frame back right away
 	offset      bool // title bar kept but hidden above the screen (enforced frame, or the app's own bar)
-	squared     bool // rounded corners turned off by us
 	manual      bool // title bar removed with the hotkey on a window that isn't snapped
 	broken      bool // Windows refused a change, usually because the window runs elevated
 	gaveUp      bool
@@ -251,9 +250,6 @@ func (m *manager) reloadConfig() {
 	m.cfg = cfg
 	m.cfgStamp = fileStamp(configPath)
 	m.registerHotkeys()
-	if old.SquareCorners != cfg.SquareCorners {
-		m.applyCorners()
-	}
 	if old.RemoveTitleBars && !cfg.RemoveTitleBars {
 		m.restoreAll("turned off")
 	}
@@ -329,7 +325,6 @@ func (m *manager) track(h uintptr) *window {
 	if saved := getProp(h, propSavedStyle); saved != 0 {
 		w.stripped, w.origStyle, w.origExStyle = true, uint32(saved>>32), uint32(saved)
 		w.titleBar, w.fixedSize = true, w.origStyle&wsThickFrame == 0
-		w.squared = m.cfg.SquareCorners
 		log.Printf("%s: title bar was removed by an earlier FancyBorderless", m.describe(h, w))
 		return w
 	}
@@ -436,10 +431,6 @@ func (m *manager) noteRefusal(h uintptr, w *window) {
 	w.offset, w.stripped = true, false
 	removeProp(h, propSavedStyle)
 	setProp(h, propHidden, 1)
-	if w.squared {
-		setCornerPreference(h, dwmwcpDefault)
-		w.squared = false
-	}
 	log.Printf("%s keeps putting its title bar back; hiding it above the screen instead", m.describe(h, w))
 }
 
@@ -572,10 +563,6 @@ func (m *manager) strip(h uintptr, w *window, target rect) {
 		m.markBroken(h, w, "removing the title bar", err)
 		return
 	}
-	if m.cfg.SquareCorners {
-		setCornerPreference(h, dwmwcpDoNotRound)
-		w.squared = true
-	}
 	w.stripped, w.strippedAt = true, time.Now()
 	setProp(h, propSavedStyle, uintptr(w.origStyle)<<32|uintptr(w.origExStyle))
 	if err := setWindowPos(h, target, swpQuiet|swpFrameChanged); err != nil {
@@ -632,10 +619,6 @@ func (m *manager) restore(h uintptr, w *window, why string) {
 	if err := setStyles(h, style, ex); err != nil {
 		m.markBroken(h, w, "restoring the title bar", err)
 		return
-	}
-	if w.squared {
-		setCornerPreference(h, dwmwcpDefault)
-		w.squared = false
 	}
 	w.stripped, w.manual = false, false
 	removeProp(h, propSavedStyle)
@@ -728,25 +711,6 @@ func (m *manager) setEnabled(on bool) {
 		m.restoreAll("turned off")
 	}
 	m.updateTrayIcon()
-}
-
-func (m *manager) setSquareCorners(on bool) {
-	m.cfg.SquareCorners = on
-	m.saveConfig()
-	m.applyCorners()
-}
-
-func (m *manager) applyCorners() {
-	pref := uint32(dwmwcpDefault)
-	if m.cfg.SquareCorners {
-		pref = dwmwcpDoNotRound
-	}
-	for h, w := range m.windows {
-		if w.stripped && isWindow(h) {
-			setCornerPreference(h, pref)
-			w.squared = m.cfg.SquareCorners
-		}
-	}
 }
 
 // setKeep remembers whether an app keeps its title bar and applies it to its open windows.

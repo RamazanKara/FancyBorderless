@@ -15,7 +15,6 @@ import (
 // as soon as it's saved.
 type config struct {
 	RemoveTitleBars bool `json:"removeTitleBars"`
-	SquareCorners   bool `json:"squareCorners"`
 	// The user's choices per app. Apps in neither list lose their title bar unless it has
 	// tabs or buttons in it, like a browser's.
 	KeepTitleBarApps     []string `json:"keepTitleBarApps"`
@@ -29,7 +28,6 @@ type config struct {
 func defaultConfig() config {
 	return config{
 		RemoveTitleBars:    true,
-		SquareCorners:      true,
 		KeepTitleBarApps:   []string{},
 		RemoveTitleBarApps: []string{},
 		// Shift is included because Ctrl+Alt+<key> is AltGr+<key> on many keyboard layouts.

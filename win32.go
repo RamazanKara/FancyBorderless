@@ -75,7 +75,6 @@ var (
 	procSetLastError                = kernel32.NewProc("SetLastError")
 
 	procDwmGetWindowAttribute = dwmapi.NewProc("DwmGetWindowAttribute")
-	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
 
 	procShellExecuteW    = shell32.NewProc("ShellExecuteW")
 	procShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
@@ -109,11 +108,8 @@ const (
 	eddGetDeviceInterfaceName = 1
 	displayDeviceActive       = 1
 
-	dwmwaExtendedFrameBounds    = 9
-	dwmwaCloaked                = 14
-	dwmwaWindowCornerPreference = 33
-	dwmwcpDefault               = 0
-	dwmwcpDoNotRound            = 1
+	dwmwaExtendedFrameBounds = 9
+	dwmwaCloaked             = 14
 
 	processQueryLimitedInformation = 0x1000
 
@@ -414,10 +410,6 @@ func isCloaked(h uintptr) bool {
 	var v uint32
 	hr, _, _ := procDwmGetWindowAttribute.Call(h, dwmwaCloaked, uintptr(unsafe.Pointer(&v)), unsafe.Sizeof(v))
 	return hr == 0 && v != 0
-}
-
-func setCornerPreference(h uintptr, pref uint32) {
-	procDwmSetWindowAttribute.Call(h, dwmwaWindowCornerPreference, uintptr(unsafe.Pointer(&pref)), unsafe.Sizeof(pref))
 }
 
 // scaleForWindow converts a size in pixels at 100 % scaling to the window's monitor.
