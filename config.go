@@ -102,7 +102,7 @@ func matchesApp(list []string, exePath string) bool {
 	return false
 }
 
-// displayName turns "Plex.exe" into "Plex" for menus and notifications.
+// displayName turns "MyApp.exe" into "MyApp" for menus and notifications.
 func displayName(exeName string) string {
 	if strings.HasSuffix(strings.ToLower(exeName), ".exe") {
 		return exeName[:len(exeName)-len(".exe")]

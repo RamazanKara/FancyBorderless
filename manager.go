@@ -256,6 +256,10 @@ func (m *manager) reloadConfig() {
 		m.restoreAll("turned off")
 	}
 	m.refitAll()
+	if !old.RemoveTitleBars && cfg.RemoveTitleBars && m.fzStamp != "" {
+		// Windows snapped while it was off haven't been looked at yet.
+		m.findNewlySnapped()
+	}
 	m.updateTrayIcon()
 	log.Print("settings loaded")
 }
