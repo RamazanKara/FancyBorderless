@@ -2,7 +2,7 @@
 
 Removes the title bar from windows that [FancyZones](https://learn.microsoft.com/windows/powertoys/fancyzones) has snapped, so they fill their zone exactly. Games included.
 
-I built this for a 49" 32:9 monitor where the left half runs a game and the right half holds Plex, an IPTV player or an editor. FancyZones handles the layouts well, but every snapped window keeps its title bar. For most apps that only wastes space. For a game running in windowed mode at exactly the zone size it's worse: the title bar pushes the picture down and the bottom of the game ends up cut off.
+I built this for a 49" 32:9 monitor where I split up stuff. FancyZones handles the layouts well, but every snapped window keeps its title bar. For most apps that only wastes space. For a game running in windowed mode at exactly the zone size it's worse: the title bar pushes the picture down and the bottom of the game ends up cut off.
 
 ## What it does
 
@@ -30,7 +30,7 @@ FancyZones only resizes windows that have a resize border. Once the border is go
 
 FancyBorderless sleeps until something happens. It listens system-wide only for windows appearing and for the end of a mouse drag, follows window moves only for the programs whose windows it manages, and gets notified by Windows when FancyZones' files change. Mouse movement never wakes it up. Apart from that there's one quick check every five seconds.
 
-Measured on a Ryzen 7 5800X3D with a game, Plex and several other windows open: about 14 MB of memory and 0.05% of one CPU core while idle, which is at the limit of what Windows can measure. Moving the mouse costs nothing.
+Measured about 14 MB of memory and 0.05% of one CPU core while idle, which is at the limit of what Windows can measure. Moving the mouse costs nothing.
 
 ## Requirements
 
@@ -106,7 +106,7 @@ FancyBorderless.exe --version
 - Hiding a title bar above the screen only works in zones along the top of a monitor. In other zones a program that insists on its title bar, or draws its own, keeps it.
 - Windows that run as administrator need PowerToys and FancyBorderless in administrator mode (see "Games that run as administrator").
 - If FancyBorderless is killed, windows stay borderless until it starts again. It then recognizes them and restores their title bars when they leave their zone or when it exits.
-- It never touches game memory or injects code, but anti-cheat systems differ and I can't promise every one of them ignores window style changes.
+- It never touches game memory or injects code.
 - So far it's been tested at 100% display scaling.
 
 ## Build from source
