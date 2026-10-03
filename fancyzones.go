@@ -97,15 +97,15 @@ func (f *fancyZones) load() error {
 
 type monitor struct {
 	device   string // \\.\DISPLAY1
-	pnp      string // SAM7454
-	instance string // 7&17842d4&0&UID516
+	pnp      string // ABC1234
+	instance string // 4&12ab34cd&0&UID256
 	bounds   rect
 	work     rect
 	primary  bool
 }
 
 // identifyMonitor derives the ids FancyZones keys applied-layouts.json with from the
-// monitor's device interface path, e.g. \\?\DISPLAY#SAM7454#7&17842d4&0&UID516#{e6f07b5f-...}.
+// monitor's device interface path, e.g. \\?\DISPLAY#ABC1234#4&12ab34cd&0&UID256#{e6f07b5f-...}.
 func identifyMonitor(hmon uintptr) (monitor, bool) {
 	mi, ok := monitorInfo(hmon)
 	if !ok {
