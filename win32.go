@@ -29,7 +29,6 @@ var (
 	procGetClientRect                 = user32.NewProc("GetClientRect")
 	procGetCursorPos                  = user32.NewProc("GetCursorPos")
 	procGetForegroundWindow           = user32.NewProc("GetForegroundWindow")
-	procGetMessageW                   = user32.NewProc("GetMessageW")
 	procGetMonitorInfoW               = user32.NewProc("GetMonitorInfoW")
 	procGetPropW                      = user32.NewProc("GetPropW")
 	procGetWindowLongPtrW             = user32.NewProc("GetWindowLongPtrW")
@@ -44,14 +43,18 @@ var (
 	procLoadIconW                     = user32.NewProc("LoadIconW")
 	procMessageBeep                   = user32.NewProc("MessageBeep")
 	procMonitorFromWindow             = user32.NewProc("MonitorFromWindow")
+	procMsgWaitForMultipleObjectsEx   = user32.NewProc("MsgWaitForMultipleObjectsEx")
+	procPeekMessageW                  = user32.NewProc("PeekMessageW")
 	procPostMessageW                  = user32.NewProc("PostMessageW")
 	procPostQuitMessage               = user32.NewProc("PostQuitMessage")
 	procRegisterClassExW              = user32.NewProc("RegisterClassExW")
 	procRegisterHotKey                = user32.NewProc("RegisterHotKey")
 	procRegisterWindowMessageW        = user32.NewProc("RegisterWindowMessageW")
+	procRemovePropW                   = user32.NewProc("RemovePropW")
 	procSendMessageTimeoutW           = user32.NewProc("SendMessageTimeoutW")
 	procSetForegroundWindow           = user32.NewProc("SetForegroundWindow")
 	procSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
+	procSetPropW                      = user32.NewProc("SetPropW")
 	procSetTimer                      = user32.NewProc("SetTimer")
 	procSetWinEventHook               = user32.NewProc("SetWinEventHook")
 	procSetWindowLongPtrW             = user32.NewProc("SetWindowLongPtrW")
@@ -61,11 +64,13 @@ var (
 	procUnhookWinEvent                = user32.NewProc("UnhookWinEvent")
 	procUnregisterHotKey              = user32.NewProc("UnregisterHotKey")
 
-	procAttachConsole              = kernel32.NewProc("AttachConsole")
-	procCreateMutexW               = kernel32.NewProc("CreateMutexW")
-	procGetModuleHandleW           = kernel32.NewProc("GetModuleHandleW")
-	procQueryFullProcessImageNameW = kernel32.NewProc("QueryFullProcessImageNameW")
-	procSetLastError               = kernel32.NewProc("SetLastError")
+	procAttachConsole               = kernel32.NewProc("AttachConsole")
+	procCreateMutexW                = kernel32.NewProc("CreateMutexW")
+	procFindFirstChangeNotification = kernel32.NewProc("FindFirstChangeNotificationW")
+	procFindNextChangeNotification  = kernel32.NewProc("FindNextChangeNotification")
+	procGetModuleHandleW            = kernel32.NewProc("GetModuleHandleW")
+	procQueryFullProcessImageNameW  = kernel32.NewProc("QueryFullProcessImageNameW")
+	procSetLastError                = kernel32.NewProc("SetLastError")
 
 	procDwmGetWindowAttribute = dwmapi.NewProc("DwmGetWindowAttribute")
 	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
@@ -136,6 +141,16 @@ const (
 	htCaption       = 2
 	smtoAbortIfHung = 0x0002
 	msgfltAllow     = 1
+
+	wmQuit             = 0x0012
+	pmRemove           = 0x0001
+	qsAllInput         = 0x04FF
+	mwmoInputAvailable = 0x0004
+	infinite           = 0xFFFFFFFF
+	waitFailed         = 0xFFFFFFFF
+
+	fileNotifyChangeFileName  = 0x01
+	fileNotifyChangeLastWrite = 0x10
 
 	modAlt      = 0x0001
 	modControl  = 0x0002
@@ -331,31 +346,35 @@ func hitTest(h uintptr, x, y int32) (uintptr, bool) {
 }
 
 // ownTitleBarHeight measures a title bar that an app draws itself: apps answer "caption" to
-// hitTest for it. A tab strip answers "caption" only between the tabs, so the bar has to end
-// at the same height across the left half of the window to count. Zero means none was found.
+// hitTest for it. One column finds where the bar ends; a few more confirm it ends at the same
+// height across the left half of the window, which a tab strip doesn't (tabs answer
+// "content"). Zero means none was found.
 func ownTitleBarHeight(h uintptr) int32 {
 	const maxBar, minBar = 80, 16
 	r := visibleRect(h)
-	height := int32(-1)
-	for _, percent := range []int32{15, 30, 45, 60} {
-		x := r.Left + r.width()*percent/100
-		bottom := int32(-1)
-		for y := int32(0); y < maxBar; y++ {
-			hit, ok := hitTest(h, x, r.Top+y)
-			if !ok {
-				return 0
-			}
-			if hit == htCaption {
-				bottom = y
-			}
-		}
-		if bottom < 0 || (height >= 0 && bottom+1 != height) {
+	column := func(percent int32) int32 { return r.Left + r.width()*percent/100 }
+	x := column(45)
+	bottom := int32(-1)
+	for y := int32(0); y < maxBar; y++ {
+		hit, ok := hitTest(h, x, r.Top+y)
+		if !ok {
 			return 0
 		}
-		height = bottom + 1
+		if hit == htCaption {
+			bottom = y
+		}
 	}
+	height := bottom + 1
 	if height < minBar {
 		return 0
+	}
+	for _, percent := range []int32{15, 30, 60} {
+		x := column(percent)
+		last, ok1 := hitTest(h, x, r.Top+height-1)
+		below, ok2 := hitTest(h, x, r.Top+height)
+		if !ok1 || !ok2 || last != htCaption || below == htCaption {
+			return 0
+		}
 	}
 	return height
 }
@@ -446,6 +465,26 @@ func zoneBits(h uintptr) uint64 {
 	return uint64(r)
 }
 
+// Our own marks on the windows we change. Window properties live with the window, so a new
+// FancyBorderless instance can still undo the changes after the old one was killed.
+var (
+	propSavedStyle = utf16Ptr("FancyBorderless_style")  // original style << 32 | ex-style
+	propHidden     = utf16Ptr("FancyBorderless_hidden") // title bar kept but placed above the screen
+)
+
+func getProp(h uintptr, name *uint16) uintptr {
+	r, _, _ := procGetPropW.Call(h, uintptr(unsafe.Pointer(name)))
+	return r
+}
+
+func setProp(h uintptr, name *uint16, value uintptr) {
+	procSetPropW.Call(h, uintptr(unsafe.Pointer(name)), value)
+}
+
+func removeProp(h uintptr, name *uint16) {
+	procRemovePropW.Call(h, uintptr(unsafe.Pointer(name)))
+}
+
 func monitorFromWindow(h uintptr) uintptr {
 	r, _, _ := procMonitorFromWindow.Call(h, monitorDefaultToNearest)
 	return r
@@ -473,15 +512,22 @@ var (
 )
 
 func topLevelWindows() []uintptr {
-	enumResult = nil
+	enumResult = enumResult[:0] // reuse the buffer; callers don't hold on to it
 	procEnumWindows.Call(enumWindowsCallback, 0)
 	return enumResult
 }
 
 func allMonitors() []uintptr {
-	enumResult = nil
+	enumResult = enumResult[:0]
 	procEnumDisplayMonitors.Call(0, 0, enumMonitorsCallback, 0)
 	return enumResult
+}
+
+// watchFolder returns a handle Windows signals when a file in dir is written or replaced.
+func watchFolder(dir string) (syscall.Handle, bool) {
+	h, _, _ := procFindFirstChangeNotification.Call(uintptr(unsafe.Pointer(utf16Ptr(dir))), 0,
+		fileNotifyChangeLastWrite|fileNotifyChangeFileName)
+	return syscall.Handle(h), syscall.Handle(h) != syscall.InvalidHandle && h != 0
 }
 
 func openFile(path string) {

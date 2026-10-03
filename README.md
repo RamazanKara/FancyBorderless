@@ -19,17 +19,23 @@ I built this for a 49" 32:9 monitor where the left half runs a game and the righ
 FancyBorderless works entirely from the outside. It doesn't inject anything into other processes and doesn't hook games.
 
 - FancyZones marks every window it snaps with a window property (`FancyZones_zones`) holding the zone number. FancyBorderless reads that property to know which windows are snapped and where.
-- It reads FancyZones' layout files (`applied-layouts.json`, `custom-layouts.json`) and calculates the zone rectangles with the same integer math FancyZones uses, so windows land on the same pixels.
+- It reads FancyZones' layout files (`applied-layouts.json`, `custom-layouts.json`) and calculates the zone rectangles with the same integer math FancyZones uses, for custom layouts and the built-in templates alike, so windows land on the same pixels.
 - To tell a title bar Windows draws from one an app draws itself, it compares where the window's content starts with where the window starts. For apps that draw their own bar it asks the window what's at each point near the top (`WM_NCHITTEST`, the same question Windows asks to know where a window can be dragged). A plain title bar answers "caption" across its whole width; a tab strip doesn't.
 - It changes windows with the standard `SetWindowLongPtr` and `SetWindowPos` calls, listens for window events with an out-of-context `SetWinEventHook`, and uses `RegisterHotKey` for its shortcut.
+- It marks each window it changes with a window property of its own. If FancyBorderless is killed, the next instance finds those marks and can still put the title bars back.
 
 FancyZones only resizes windows that have a resize border. Once the border is gone FancyZones just moves the window on layout changes, which is why FancyBorderless does the resizing itself.
+
+## Resource use
+
+FancyBorderless sleeps until something happens. It listens system-wide only for windows appearing and for the end of a mouse drag, follows window moves only for the programs whose windows it manages, and gets notified by Windows when FancyZones' files change. Mouse movement never wakes it up. Apart from that there's one quick check every five seconds.
+
+Measured on a Ryzen 7 5800X3D with a game, Plex and several other windows open: about 14 MB of memory and 0.05% of one CPU core while idle, which is at the limit of what Windows can measure. Moving the mouse costs nothing.
 
 ## Requirements
 
 - Windows 10 or 11, 64-bit
-- [PowerToys](https://github.com/microsoft/PowerToys) with FancyZones enabled
-- Custom FancyZones layouts. The built-in templates (Columns, Rows, Grid, Priority Grid, Focus) aren't supported yet.
+- [PowerToys](https://github.com/microsoft/PowerToys) with FancyZones enabled. Custom layouts and the built-in templates (Columns, Rows, Grid, Priority Grid, Focus) both work.
 
 ## Install
 
@@ -97,10 +103,9 @@ FancyBorderless.exe --version
 
 ## Limitations
 
-- Only custom FancyZones layouts are supported.
 - Hiding a title bar above the screen only works in zones along the top of a monitor. In other zones a program that insists on its title bar, or draws its own, keeps it.
 - Windows that run as administrator need PowerToys and FancyBorderless in administrator mode (see "Games that run as administrator").
-- If FancyBorderless crashes, windows stay borderless until it runs again or you press the hotkey.
+- If FancyBorderless is killed, windows stay borderless until it starts again. It then recognizes them and restores their title bars when they leave their zone or when it exits.
 - It never touches game memory or injects code, but anti-cheat systems differ and I can't promise every one of them ignores window style changes.
 - So far it's been tested at 100% display scaling.
 

@@ -27,7 +27,9 @@ const (
 )
 
 type window struct {
-	exe string
+	pid  uint32
+	exe  string
+	bits uint64 // zone marker when last evaluated
 	// titleBar: Windows draws a title bar above the window's content.
 	titleBar bool
 	// ownBar: height of a plain title bar the app draws itself (WPF and UWP apps, for example).
@@ -62,58 +64,78 @@ type manager struct {
 	layouts  map[uintptr]zoneLayout // per monitor handle
 	windows  map[uintptr]*window
 	due      map[uintptr]time.Time
+	ticking  bool
 	reported map[string]bool
 	hooks    []uintptr
+	// moveHooks listen for window moves of the processes we manage, one hook per process.
+	// A system-wide move hook would also fire on every mouse movement.
+	moveHooks map[uint32]uintptr
 }
 
 func newManager() *manager {
 	return &manager{
-		ownPID:   uint32(os.Getpid()),
-		fz:       newFancyZones(),
-		layouts:  map[uintptr]zoneLayout{},
-		windows:  map[uintptr]*window{},
-		due:      map[uintptr]time.Time{},
-		reported: map[string]bool{},
+		ownPID:    uint32(os.Getpid()),
+		fz:        newFancyZones(),
+		layouts:   map[uintptr]zoneLayout{},
+		windows:   map[uintptr]*window{},
+		due:       map[uintptr]time.Time{},
+		reported:  map[string]bool{},
+		moveHooks: map[uint32]uintptr{},
 	}
 }
 
 // WINEVENT_OUTOFCONTEXT: Windows queues the events to this thread's message loop instead of
 // loading code into the processes that raise them.
 var winEventCallback = syscall.NewCallback(func(hook, event, hwnd, idObject, idChild, thread, eventTime uintptr) uintptr {
+	defer recoverCallback()
 	if hwnd != 0 && int32(idObject) == objidWindow && int32(idChild) == childidSelf {
 		app.onEvent(uint32(event), hwnd)
 	}
 	return 0
 })
 
-func (m *manager) hook() {
-	ranges := [][2]uintptr{
-		{eventSystemMoveSizeEnd, eventSystemMoveSizeEnd},
-		{eventObjectDestroy, eventObjectShow},
-		{eventObjectLocationChange, eventObjectLocationChange},
+func setWinEventHook(event uint32, pid uint32) uintptr {
+	h, _, err := procSetWinEventHook.Call(uintptr(event), uintptr(event), 0, winEventCallback, uintptr(pid), 0, winEventOutOfContext|winEventSkipOwnProcess)
+	if h == 0 {
+		log.Printf("SetWinEventHook %#x: %v", event, err)
 	}
-	for _, r := range ranges {
-		h, _, err := procSetWinEventHook.Call(r[0], r[1], 0, winEventCallback, 0, 0, winEventOutOfContext|winEventSkipOwnProcess)
-		if h == 0 {
-			log.Printf("SetWinEventHook %#x: %v", r[0], err)
-			continue
+	return h
+}
+
+// hook listens system-wide only for events that are rare: a window appearing and the end of
+// a mouse drag.
+func (m *manager) hook() {
+	for _, event := range []uint32{eventObjectShow, eventSystemMoveSizeEnd} {
+		if h := setWinEventHook(event, 0); h != 0 {
+			m.hooks = append(m.hooks, h)
 		}
-		m.hooks = append(m.hooks, h)
+	}
+}
+
+func (m *manager) watchMoves(pid uint32) {
+	if _, ok := m.moveHooks[pid]; ok || pid == 0 {
+		return
+	}
+	if h := setWinEventHook(eventObjectLocationChange, pid); h != 0 {
+		m.moveHooks[pid] = h
 	}
 }
 
 func (m *manager) onEvent(event uint32, h uintptr) {
-	switch event {
-	case eventObjectDestroy:
-		delete(m.windows, h)
-		delete(m.due, h)
-	case eventObjectLocationChange:
-		// Raised for every moving window; only snapped or already handled ones matter.
-		if _, ok := m.windows[h]; ok || zoneBits(h) != 0 {
-			m.due[h] = time.Now().Add(settleDelay)
+	if event == eventObjectLocationChange {
+		if _, ok := m.windows[h]; !ok {
+			return
 		}
-	default:
-		m.due[h] = time.Now().Add(settleDelay)
+	}
+	m.schedule(h, settleDelay)
+}
+
+// schedule evaluates a window after a delay; the timer only runs while something is due.
+func (m *manager) schedule(h uintptr, delay time.Duration) {
+	m.due[h] = time.Now().Add(delay)
+	if !m.ticking {
+		procSetTimer.Call(m.hwnd, timerTick, 50, 0)
+		m.ticking = true
 	}
 }
 
@@ -136,12 +158,6 @@ func (m *manager) scheduleRefit() {
 }
 
 func (m *manager) tick() {
-	if len(m.due) == 0 {
-		return
-	}
-	// A layout switch moves windows and rewrites applied-layouts.json; fit against the new
-	// layout, not the cached one.
-	m.reloadIfChanged()
 	now := time.Now()
 	for h, t := range m.due {
 		if now.Before(t) {
@@ -150,19 +166,57 @@ func (m *manager) tick() {
 		delete(m.due, h)
 		m.evaluate(h)
 	}
+	if len(m.due) == 0 {
+		procKillTimer.Call(m.hwnd, timerTick)
+		m.ticking = false
+	}
 }
 
-// scan catches what the events miss, such as FancyZones stamping a window after moving it.
-func (m *manager) scan() {
+// onFolderChanged runs when Windows reports a write in FancyZones' folder or in ours. In
+// FancyZones' folder that's a layout switch or a snap: FancyZones records every snap in
+// app-zone-history.json, so windows snapped with the keyboard are picked up right away.
+func (m *manager) onFolderChanged(fancyZones bool) {
 	m.reloadIfChanged()
+	if fancyZones {
+		m.findNewlySnapped()
+	}
+}
+
+// findNewlySnapped looks for snapped windows we don't know yet. Windows we already manage
+// are kept up to date by their move hooks.
+func (m *manager) findNewlySnapped() {
 	for _, h := range topLevelWindows() {
-		if _, ok := m.windows[h]; ok || zoneBits(h) != 0 {
+		if _, ok := m.windows[h]; !ok && isWindowVisible(h) && zoneBits(h) != 0 {
 			m.evaluate(h)
 		}
 	}
-	for h := range m.windows {
+}
+
+// scan is the safety net for anything no event reports, such as a virtual desktop switch.
+func (m *manager) scan() {
+	m.reloadIfChanged()
+	if d := currentDesktop(); d != m.desktop {
+		m.desktop = d
+		m.layouts = map[uintptr]zoneLayout{}
+		m.refitAll()
+	}
+	m.findNewlySnapped()
+	pids := map[uint32]bool{}
+	for h, w := range m.windows {
 		if !isWindow(h) {
 			delete(m.windows, h)
+			delete(m.due, h)
+			continue
+		}
+		pids[w.pid] = true
+		if zoneBits(h) != w.bits {
+			m.schedule(h, 0)
+		}
+	}
+	for pid, hook := range m.moveHooks {
+		if !pids[pid] {
+			procUnhookWinEvent.Call(hook)
+			delete(m.moveHooks, pid)
 		}
 	}
 }
@@ -180,11 +234,6 @@ func (m *manager) reloadIfChanged() {
 		m.fzStamp = stamp
 		delete(m.reported, "fz-load")
 		log.Print("FancyZones layouts loaded")
-		m.layouts = map[uintptr]zoneLayout{}
-		m.refitAll()
-	}
-	if d := currentDesktop(); d != m.desktop {
-		m.desktop = d
 		m.layouts = map[uintptr]zoneLayout{}
 		m.refitAll()
 	}
@@ -221,10 +270,9 @@ func (m *manager) saveConfig() {
 
 // refitAll re-evaluates every handled window with a fresh change budget.
 func (m *manager) refitAll() {
-	now := time.Now()
 	for h, w := range m.windows {
 		w.changes, w.gaveUp = nil, false
-		m.due[h] = now
+		m.schedule(h, 0)
 	}
 }
 
@@ -238,6 +286,9 @@ func (m *manager) evaluate(h uintptr) {
 	}
 	w := m.windows[h]
 	bits := zoneBits(h)
+	if w != nil {
+		w.bits = bits
+	}
 	if bits == 0 {
 		if w != nil && !w.manual {
 			m.showTitleBar(h, w, "left its zone")
@@ -246,6 +297,7 @@ func (m *manager) evaluate(h uintptr) {
 	}
 	if w == nil {
 		w = m.track(h)
+		w.bits = bits
 	}
 	if !w.broken {
 		m.handleSnapped(h, w, bits)
@@ -262,13 +314,22 @@ func (m *manager) isCandidate(h uintptr) bool {
 	return !isCloaked(h) && windowPID(h) != m.ownPID
 }
 
-// track measures a window the first time it's seen, while it still has its own frame.
+// track measures a window the first time it's seen, while it still has its own frame, or
+// picks up where an earlier FancyBorderless instance left off.
 func (m *manager) track(h uintptr) *window {
-	w := &window{
-		exe:       processPath(windowPID(h)),
-		titleBar:  drawsTitleBar(h),
-		fixedSize: windowStyle(h)&wsThickFrame == 0,
+	pid := windowPID(h)
+	w := &window{pid: pid, exe: processPath(pid)}
+	m.windows[h] = w
+	if saved := getProp(h, propSavedStyle); saved != 0 {
+		w.stripped, w.origStyle, w.origExStyle = true, uint32(saved>>32), uint32(saved)
+		w.titleBar, w.fixedSize = true, w.origStyle&wsThickFrame == 0
+		w.squared = m.cfg.SquareCorners
+		log.Printf("%s: title bar was removed by an earlier FancyBorderless", m.describe(h, w))
+		return w
 	}
+	w.titleBar = drawsTitleBar(h)
+	w.fixedSize = windowStyle(h)&wsThickFrame == 0
+	w.offset = getProp(h, propHidden) != 0
 	if !w.titleBar {
 		// An app's own bar is part of its content and can't be removed, only hidden above
 		// the screen.
@@ -283,7 +344,6 @@ func (m *manager) track(h uintptr) *window {
 		w.offset = true
 		log.Printf("%s is a popup window; hiding its title bar above the screen", m.describe(h, w))
 	}
-	m.windows[h] = w
 	return w
 }
 
@@ -296,6 +356,8 @@ func (m *manager) handleSnapped(h uintptr, w *window, bits uint64) {
 		m.showTitleBar(h, w, "kept")
 		return
 	}
+	// From here on the window is managed, so react when it moves or changes its frame.
+	m.watchMoves(w.pid)
 	style := windowStyle(h)
 	if isZoomed(h) {
 		return
@@ -347,6 +409,8 @@ func (m *manager) noteRefusal(h uintptr, w *window) {
 		return
 	}
 	w.offset, w.stripped = true, false
+	removeProp(h, propSavedStyle)
+	setProp(h, propHidden, 1)
 	if w.squared {
 		setCornerPreference(h, dwmwcpDefault)
 		w.squared = false
@@ -487,6 +551,7 @@ func (m *manager) strip(h uintptr, w *window, target rect) bool {
 		w.squared = true
 	}
 	w.stripped, w.strippedAt = true, time.Now()
+	setProp(h, propSavedStyle, uintptr(w.origStyle)<<32|uintptr(w.origExStyle))
 	if err := setWindowPos(h, target, swpQuiet|swpFrameChanged); err != nil {
 		m.markBroken(h, w, "resizing", err)
 		return false
@@ -538,6 +603,7 @@ func (m *manager) restore(h uintptr, w *window, why string) {
 		w.squared = false
 	}
 	w.stripped, w.manual = false, false
+	removeProp(h, propSavedStyle)
 	if err := setVisibleRect(h, visible); err != nil {
 		log.Printf("%s: moving after restoring the title bar: %v", m.describe(h, w), err)
 	}
@@ -747,7 +813,10 @@ func (m *manager) shutdown() {
 	for _, h := range m.hooks {
 		procUnhookWinEvent.Call(h)
 	}
-	m.hooks = nil
+	for _, h := range m.moveHooks {
+		procUnhookWinEvent.Call(h)
+	}
+	m.hooks, m.moveHooks = nil, map[uint32]uintptr{}
 	m.restoreAll("FancyBorderless exited")
 	m.removeTrayIcon()
 }

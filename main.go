@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"syscall"
 	"time"
@@ -18,7 +19,7 @@ import (
 )
 
 const (
-	version     = "1.2.0"
+	version     = "1.3.0"
 	windowClass = "FancyBorderless"
 	restartFlag = "--restart"
 )
@@ -32,6 +33,10 @@ var (
 func main() {
 	// Window messages, hooks and timers all belong to the thread that created them.
 	runtime.LockOSThread()
+	// One logical thread and a tiny heap: keep the Go runtime from holding on to memory or
+	// threads it doesn't need.
+	runtime.GOMAXPROCS(1)
+	debug.SetGCPercent(25)
 	procSetProcessDpiAwarenessContext.Call(dpiAwarenessPerMonitorV2)
 
 	restart := len(os.Args) > 1 && os.Args[1] == restartFlag
@@ -69,21 +74,66 @@ func run(restart bool) error {
 
 	app = newManager()
 	if err := app.createWindow(); err != nil {
+		log.Print(err)
 		return err
 	}
 	app.start()
-
-	var msg winMsg
-	for {
-		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
-		if int32(r) <= 0 {
-			break
-		}
-		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
-		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
+	if err := messageLoop(); err != nil {
+		log.Print(err)
+		return err
 	}
 	log.Print("exited")
 	return nil
+}
+
+// messageLoop sleeps until there's a window message, a hook event, or a change in
+// FancyZones' or our settings folder. Nothing runs in between.
+func messageLoop() error {
+	var watches []syscall.Handle
+	var watchesFancyZones []bool
+	for _, dir := range []string{app.fz.dir, appDir} {
+		if h, ok := watchFolder(dir); ok {
+			watches = append(watches, h)
+			watchesFancyZones = append(watchesFancyZones, dir == app.fz.dir)
+		}
+	}
+	var msg winMsg
+	for {
+		// The handle list's address has to be taken inside the call: Go may move it otherwise.
+		var r uintptr
+		var err error
+		if len(watches) > 0 {
+			r, _, err = procMsgWaitForMultipleObjectsEx.Call(uintptr(len(watches)), uintptr(unsafe.Pointer(&watches[0])), infinite, qsAllInput, mwmoInputAvailable)
+		} else {
+			r, _, err = procMsgWaitForMultipleObjectsEx.Call(0, 0, infinite, qsAllInput, mwmoInputAvailable)
+		}
+		switch {
+		case r == waitFailed:
+			return fmt.Errorf("MsgWaitForMultipleObjectsEx: %w", err)
+		case r < uintptr(len(watches)):
+			procFindNextChangeNotification.Call(uintptr(watches[r]))
+			app.onFolderChanged(watchesFancyZones[r])
+		}
+		for {
+			got, _, _ := procPeekMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0, pmRemove)
+			if got == 0 {
+				break
+			}
+			if msg.Message == wmQuit {
+				return nil
+			}
+			procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
+			procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
+		}
+	}
+}
+
+// recoverCallback keeps a bug from taking FancyBorderless down: a panic can't unwind through
+// the Windows code that called us, so it's caught and logged here.
+func recoverCallback() {
+	if r := recover(); r != nil {
+		log.Printf("internal error: %v\n%s", r, debug.Stack())
+	}
 }
 
 // claimInstance makes sure only one FancyBorderless runs. After a restart the previous
@@ -145,16 +195,20 @@ func (m *manager) start() {
 	m.addTrayIcon()
 	m.hook()
 	procSetTimer.Call(m.hwnd, timerTick, 100, 0)
-	procSetTimer.Call(m.hwnd, timerScan, 1000, 0)
+	procSetTimer.Call(m.hwnd, timerScan, 5000, 0)
 	log.Printf("FancyBorderless %s started (administrator: %v)", version, isElevated())
 	if m.cfg.RunAsAdministrator && !isElevated() {
 		m.notify("Running without administrator rights, so games that run as administrator can't be changed.")
 	}
 	m.syncStartup()
+	m.reloadIfChanged()
 	m.scan()
+	// Hand the memory used while starting up back to Windows.
+	debug.FreeOSMemory()
 }
 
 func wndProc(h, msg, wParam, lParam uintptr) uintptr {
+	defer recoverCallback()
 	switch msg {
 	case wmTimer:
 		app.onTimer(wParam)

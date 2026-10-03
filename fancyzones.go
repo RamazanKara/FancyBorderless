@@ -23,6 +23,7 @@ type fzApplied struct {
 		Type        string `json:"type"`
 		ShowSpacing bool   `json:"show-spacing"`
 		Spacing     int64  `json:"spacing"`
+		ZoneCount   int    `json:"zone-count"`
 	} `json:"applied-layout"`
 }
 
@@ -146,16 +147,20 @@ func (f *fancyZones) layoutFor(m monitor, desktop string) zoneLayout {
 	if entry == nil {
 		return zoneLayout{err: fmt.Errorf("FancyZones has no layout for monitor %s (%s)", m.pnp, m.device)}
 	}
+	var spacing int64
+	if entry.Layout.ShowSpacing {
+		spacing = entry.Layout.Spacing
+	}
 	if entry.Layout.Type != "custom" {
-		return zoneLayout{err: fmt.Errorf("monitor %s uses the %q template; only custom layouts are supported", m.pnp, entry.Layout.Type)}
+		zones, err := templateZones(entry.Layout.Type, m.work, entry.Layout.ZoneCount, spacing)
+		if err != nil {
+			return zoneLayout{name: entry.Layout.Type, err: err}
+		}
+		return zoneLayout{name: fmt.Sprintf("%s template, %d zones", entry.Layout.Type, entry.Layout.ZoneCount), zones: zones}
 	}
 	custom, ok := f.custom[strings.ToUpper(entry.Layout.UUID)]
 	if !ok {
 		return zoneLayout{err: fmt.Errorf("custom layout %s is missing from custom-layouts.json", entry.Layout.UUID)}
-	}
-	var spacing int64
-	if entry.Layout.ShowSpacing {
-		spacing = entry.Layout.Spacing
 	}
 	var zones map[int]rect
 	var err error
