@@ -7,10 +7,10 @@ I built this for a 49" 32:9 monitor where I split up stuff. FancyZones handles t
 ## What it does
 
 - When FancyZones snaps a window, FancyBorderless removes its title bar and border and fits it to the zone.
-- **Resizable windows** (Plex, editors, most apps) are resized to fill the zone, including after you switch FancyZones layouts.
+- **Resizable windows** (most apps) are resized to fill the zone, including after you switch FancyZones layouts.
 - **Fixed-size windows** (most games in windowed mode) keep their size. Most games keep drawing at their own resolution when the window shrinks, so making them smaller would cut the picture off. A game whose resolution is within 64 px of the zone size gets the full zone. That covers the pixels the title bar and Windows' maximum window height take away from a game running at exactly the zone size.
 - **Programs that put their title bar back** (Total War: Warhammer III does this within a fraction of a second) aren't fought over. FancyBorderless leaves the frame on and places the window so the picture covers the zone and the title bar sits above the top edge of the screen.
-- **Apps that draw their own plain title bar** (many WPF and UWP apps, SFVIP Player for example) get it hidden above the screen the same way.
+- **Apps that draw their own plain title bar** (many WPF and UWP apps) get it hidden above the screen the same way.
 - **Browsers, Explorer, Windows Terminal** and other apps that put tabs or controls into their title bar are left alone, without any list to maintain. There's nothing to remove there.
 - When a window leaves its zone, it gets its title bar back. Turning FancyBorderless off or exiting it restores every window it changed.
 
