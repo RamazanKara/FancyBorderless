@@ -116,7 +116,7 @@ func (m *manager) showMenu() {
 		add(appsMenu, mfString|mfGrayed, 0, "Snap an app with FancyZones first")
 	}
 	for i, exeName := range apps {
-		add(appsMenu, checked(m.appKeepsTitleBar(exeName)), uintptr(menuFirstApp+i), displayName(exeName))
+		add(appsMenu, checked(m.keepsTitleBar(exeName, m.hasBusyBar(exeName))), uintptr(menuFirstApp+i), displayName(exeName))
 	}
 
 	add(menu, mfString|mfGrayed, 0, "FancyBorderless "+version)
@@ -155,6 +155,6 @@ func (m *manager) showMenu() {
 		procPostMessageW.Call(m.hwnd, wmClose, 0, 0)
 	case cmd >= menuFirstApp && int(cmd-menuFirstApp) < len(apps):
 		exeName := apps[cmd-menuFirstApp]
-		m.setKeep(exeName, !m.appKeepsTitleBar(exeName))
+		m.setKeep(exeName, !m.keepsTitleBar(exeName, m.hasBusyBar(exeName)))
 	}
 }

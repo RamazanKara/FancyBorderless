@@ -82,8 +82,16 @@ const taskXML = `<?xml version="1.0" encoding="UTF-16"?>
   <Actions Context="Author"><Exec><Command>%[2]s</Command></Exec></Actions>
 </Task>`
 
+// logonTask caches whether the task exists, since only FancyBorderless creates or removes it;
+// asking schtasks every time the tray menu opens would start a process for each click.
+var logonTask struct{ known, exists bool }
+
 func logonTaskExists() bool {
-	return runHidden("schtasks", "/Query", "/TN", taskName) == nil
+	if !logonTask.known {
+		logonTask.exists = runHidden("schtasks", "/Query", "/TN", taskName) == nil
+		logonTask.known = true
+	}
+	return logonTask.exists
 }
 
 func createLogonTask() error {
@@ -108,14 +116,22 @@ func createLogonTask() error {
 		return err
 	}
 	defer os.Remove(path)
-	return runHidden("schtasks", "/Create", "/TN", taskName, "/XML", path, "/F")
+	if err := runHidden("schtasks", "/Create", "/TN", taskName, "/XML", path, "/F"); err != nil {
+		return err
+	}
+	logonTask.known, logonTask.exists = true, true
+	return nil
 }
 
 func deleteLogonTask() error {
 	if !logonTaskExists() {
 		return nil
 	}
-	return runHidden("schtasks", "/Delete", "/TN", taskName, "/F")
+	if err := runHidden("schtasks", "/Delete", "/TN", taskName, "/F"); err != nil {
+		return err
+	}
+	logonTask.exists = false
+	return nil
 }
 
 // runHidden runs a console tool without flashing a console window.

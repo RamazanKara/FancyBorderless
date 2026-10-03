@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	version     = "1.3.3"
+	version     = "1.4.0"
 	windowClass = "FancyBorderless"
 	restartFlag = "--restart"
 )
@@ -54,15 +54,17 @@ func run(restart bool) error {
 	if err := os.MkdirAll(appDir, 0o755); err != nil {
 		return err
 	}
-	if cfg, _ := loadConfig(); cfg.RunAsAdministrator && !isElevated() && !restart {
-		// Hand over to an instance with administrator rights. If the Windows prompt is
-		// declined, carry on without them.
-		if relaunchElevated(false) == nil {
-			return nil
-		}
-	}
+	// Claimed first, so starting FancyBorderless while it already runs exits quietly instead
+	// of asking for administrator rights.
 	if !claimInstance(restart) {
 		return nil
+	}
+	if cfg, _ := loadConfig(); cfg.RunAsAdministrator && !isElevated() && !restart {
+		// Hand over to an instance with administrator rights, which waits for this one to
+		// exit. If the Windows prompt is declined, carry on without them.
+		if relaunchElevated(true) == nil {
+			return nil
+		}
 	}
 	logFile, err := openLog()
 	if err != nil {
@@ -87,32 +89,28 @@ func run(restart bool) error {
 }
 
 // messageLoop sleeps until there's a window message, a hook event, or a change in
-// FancyZones' or our settings folder. Nothing runs in between.
+// FancyZones' folder. Nothing runs in between. Changes to our own settings file are picked up
+// by the regular scan.
 func messageLoop() error {
-	var watches []syscall.Handle
-	var watchesFancyZones []bool
-	for _, dir := range []string{app.fz.dir, appDir} {
-		if h, ok := watchFolder(dir); ok {
-			watches = append(watches, h)
-			watchesFancyZones = append(watchesFancyZones, dir == app.fz.dir)
-		}
-	}
+	watch, watching := watchFolder(app.fz.dir)
 	var msg winMsg
 	for {
-		// The handle list's address has to be taken inside the call: Go may move it otherwise.
 		var r uintptr
 		var err error
-		if len(watches) > 0 {
-			r, _, err = procMsgWaitForMultipleObjectsEx.Call(uintptr(len(watches)), uintptr(unsafe.Pointer(&watches[0])), infinite, qsAllInput, mwmoInputAvailable)
+		if watching {
+			r, _, err = procMsgWaitForMultipleObjectsEx.Call(1, uintptr(unsafe.Pointer(&watch)), infinite, qsAllInput, mwmoInputAvailable)
 		} else {
 			r, _, err = procMsgWaitForMultipleObjectsEx.Call(0, 0, infinite, qsAllInput, mwmoInputAvailable)
 		}
 		switch {
 		case r == waitFailed:
 			return fmt.Errorf("MsgWaitForMultipleObjectsEx: %w", err)
-		case r < uintptr(len(watches)):
-			procFindNextChangeNotification.Call(uintptr(watches[r]))
-			app.onFolderChanged(watchesFancyZones[r])
+		case watching && r == 0:
+			// If the folder can't be watched any more (it was deleted, say), the scan carries on.
+			if ok, _, _ := procFindNextChangeNotification.Call(uintptr(watch)); ok == 0 {
+				watching = false
+			}
+			app.onFancyZonesChanged()
 		}
 		for {
 			got, _, _ := procPeekMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0, pmRemove)
@@ -184,7 +182,12 @@ func (m *manager) createWindow() error {
 }
 
 func (m *manager) start() {
-	m.icon, _, _ = procLoadIconW.Call(0, idiApplication)
+	// The icon is resource 1 in the exe (see winres/); a build without it gets the generic one.
+	instance, _, _ := procGetModuleHandleW.Call(0)
+	size, _, _ := procGetSystemMetrics.Call(smCxSmIcon)
+	if m.icon, _, _ = procLoadImageW.Call(instance, 1, imageIcon, size, size, 0); m.icon == 0 {
+		m.icon, _, _ = procLoadIconW.Call(0, idiApplication)
+	}
 	taskbarCreated, _, _ = procRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(utf16Ptr("TaskbarCreated"))))
 	// Running as administrator, Windows would drop these messages from Explorer and from a
 	// normal "--quit" unless they're explicitly allowed.
@@ -194,14 +197,12 @@ func (m *manager) start() {
 	m.reloadConfig()
 	m.addTrayIcon()
 	m.hook()
-	procSetTimer.Call(m.hwnd, timerTick, 100, 0)
 	procSetTimer.Call(m.hwnd, timerScan, 5000, 0)
 	log.Printf("FancyBorderless %s started (administrator: %v)", version, isElevated())
 	if m.cfg.RunAsAdministrator && !isElevated() {
 		m.notify("Running without administrator rights, so games that run as administrator can't be changed.")
 	}
 	m.syncStartup()
-	m.reloadIfChanged()
 	m.scan()
 	// Hand the memory used while starting up back to Windows.
 	debug.FreeOSMemory()

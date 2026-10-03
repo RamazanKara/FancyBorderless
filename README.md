@@ -1,3 +1,5 @@
+<img src="docs/icon.png" alt="" width="72" align="right">
+
 # FancyBorderless
 
 **Borderless windows for FancyZones.** Snap a window into a zone and its title bar disappears, so games, videos and apps use every pixel of their zone.
@@ -11,10 +13,10 @@ FancyZones is brilliant at arranging windows, especially on ultrawide monitors. 
 - **Every FancyZones layout works**, your custom layouts as well as the built-in templates, down to the pixel FancyZones uses.
 - **Games fit perfectly.** A game running windowed at the zone size gets the entire zone, with nothing cut off at the bottom, and it keeps its resolution when you switch layouts, so the picture is never cropped.
 - **Apps fill their zone** and follow along whenever you switch layouts.
-- **Stubborn windows are handled too.** Programs that insist on their title bar, or draw their own, get it tucked away above the top edge of the screen.
+- **Stubborn windows are handled too.** Programs that insist on their title bar, or draw their own, get it clipped off, in any zone and on any monitor.
 - **It knows what to leave alone.** Browsers, File Explorer and other apps with tabs or buttons in their title bar keep it by default. Press the hotkey on one and its title bar goes too.
 - **One hotkey** (Ctrl+Alt+Shift+T) removes or restores the title bar of any window and remembers your choice for that app.
-- **All settings live in the tray menu**, including Start with Windows.
+- **Settings are in the tray menu**, including Start with Windows.
 - **Games that run as administrator** are supported with a single setting.
 - **It's lightweight**, using around 14 MB of memory and practically no CPU, because it sleeps until something actually happens.
 - **It's clean and safe.** No code is ever injected into other programs or games, and every change is undone when you exit.
@@ -23,17 +25,16 @@ FancyZones is brilliant at arranging windows, especially on ultrawide monitors. 
 
 1. Install [PowerToys](https://github.com/microsoft/PowerToys) and turn on FancyZones.
 2. Download `FancyBorderless.exe` from the [latest release](https://github.com/RamazanKara/FancyBorderless/releases/latest) and run it. It lives in the system tray.
-3. Snap windows the way you always do: Shift-drag, Win+arrow keys or your layout hotkeys. FancyBorderless takes it from there.
+3. Snap windows the way you always do: Shift-drag, or Win+arrow keys if **Override Windows Snap** is on in FancyZones' settings. FancyBorderless takes it from there.
 4. Click the tray icon and tick **Start with Windows** to have it ready every time you sign in.
 
 The exe isn't code-signed yet, so Windows SmartScreen may ask the first time you run it. Choose "More info", then "Run anyway", or build it yourself with a single command (see below).
 
 ## Tips for games
 
-- Set the game to **Windowed** mode at the size of its zone, for example 2560×1440 for half of a 5120×1440 screen.
+- Set the game to **Windowed** mode at the size of its zone, for example 2560×1440 for half of a 5120×1440 screen. FancyZones only snaps windowed games, not borderless or exclusive fullscreen ones.
 - Snap it into its zone once. FancyZones remembers the zone and puts the game back there on every launch ("Move newly created windows to their last known zone" in FancyZones' settings).
 - Keep games off FancyZones' excluded apps list, so FancyZones can snap them.
-- Use windowed mode rather than borderless or exclusive fullscreen, because FancyZones only snaps windowed games.
 
 ### Games that run as administrator
 
@@ -42,7 +43,7 @@ Some games run as administrator, usually because of their anti-cheat. Windows ke
 1. In PowerToys Settings, General tab, turn on **Always run as administrator** ([PowerToys docs](https://learn.microsoft.com/windows/powertoys/administrator)).
 2. In FancyBorderless's tray menu, tick **Run as administrator** and confirm the Windows prompt.
 
-With both on, Start with Windows uses a scheduled task, the same way PowerToys does it, so there's no prompt at sign-in. If you press the hotkey on such a game before setting this up, FancyBorderless tells you exactly what to turn on.
+In administrator mode, Start with Windows uses a scheduled task, the same way PowerToys does it, so there's no prompt at sign-in. If you press the hotkey on such a game before setting this up, FancyBorderless tells you exactly what to turn on.
 
 ## Tray menu
 
@@ -58,10 +59,11 @@ A notification confirms every hotkey press, so you always know what happened.
 
 FancyBorderless works entirely from the outside, using standard Windows APIs.
 
-- FancyZones marks every window it snaps with a window property (`FancyZones_zones`) holding the zone number. FancyBorderless reads that property to know which windows are snapped and where.
+- FancyZones marks every window it snaps with a window property (`FancyZones_zones`) holding the zones it's in. FancyBorderless reads that property to know which windows are snapped and where.
 - It reads FancyZones' layout files (`applied-layouts.json`, `custom-layouts.json`) and calculates the zone rectangles with the same integer math FancyZones uses, for custom layouts and built-in templates alike.
 - It tells a title bar Windows draws from one an app draws itself by comparing where the window's content starts with where the window starts. For apps that draw their own bar it asks the window what's near the top (`WM_NCHITTEST`, the same question Windows asks to know where a window can be dragged). The answers show where the bar ends and what's in it: a plain title bar answers "caption" across its whole width, while tabs and buttons answer "content".
 - It changes windows with `SetWindowLongPtr` and `SetWindowPos`, listens for window events with an out-of-context `SetWinEventHook`, and uses `RegisterHotKey` for its shortcut.
+- A title bar it can't remove is clipped off: the window is placed so its content covers the zone, and a window region (`SetWindowRgn`) leaves the rest undrawn and lets clicks through. Windows draws its own frame and backdrop on top of any region, so those are switched off for the window meanwhile.
 - It marks each window it changes with a property of its own, so even after an unexpected exit the next start recognizes those windows and can restore them.
 
 FancyZones only resizes windows that have a resize border. Once the border is gone FancyZones moves the window on layout changes, and FancyBorderless takes care of the size.
@@ -74,7 +76,7 @@ On a gaming desktop with several apps snapped it uses about 14 MB of memory and 
 
 ## Settings file
 
-Everything except the hotkey is in the tray menu. For manual tweaks, the file is at `%APPDATA%\FancyBorderless\config.json`, and changes apply the moment you save it.
+Everything except the hotkey is in the tray menu. For manual tweaks, the file is at `%APPDATA%\FancyBorderless\config.json`, and changes apply within a few seconds of saving it. If the file has a mistake, FancyBorderless keeps its current settings and tells you.
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -99,7 +101,6 @@ FancyBorderless.exe --version
 ## Good to know
 
 - For square corners on Windows 11, turn on **Disable round corners when window is snapped** in FancyZones' settings. Snapped windows then meet the zone edges exactly.
-- Title bars are tucked above the screen in zones along the top of a monitor, which is where most layouts put their main zones. In lower zones, windows that insist on their own title bar keep it.
 - It never touches game memory or injects code.
 - It has been developed and tested at 100% display scaling. Reports from other scaling levels are very welcome.
 
@@ -110,6 +111,14 @@ Requires Go 1.23 or newer. No other dependencies and no cgo.
 ```
 go build -ldflags "-H=windowsgui -s -w" -o FancyBorderless.exe .
 ```
+
+The icon comes with the source as `rsrc_windows_*.syso`, built from `winres/` with [go-winres](https://github.com/tc-hib/go-winres).
+
+## Uninstall
+
+1. Untick **Start with Windows** in the tray menu. In administrator mode, do it while FancyBorderless runs as administrator, because removing its sign-in task needs those rights.
+2. Click **Exit**. Every window gets its title bar back.
+3. Delete `FancyBorderless.exe` and the folder `%APPDATA%\FancyBorderless`.
 
 ## Contributing
 
