@@ -47,7 +47,6 @@ With both on, Start with Windows uses a scheduled task, the same way PowerToys d
 ## Tray menu
 
 - Remove title bars (turns everything on or off)
-- Square corners (turns off Windows 11's rounded corners on borderless windows so they meet the zone edges)
 - Start with Windows
 - Run as administrator
 - Keep title bar for (every snapped app; ticked apps keep their title bar, and clicking one switches it)
@@ -80,7 +79,6 @@ Everything except the hotkey is in the tray menu. For manual tweaks, the file is
 | Setting | Default | Meaning |
 |---|---|---|
 | `removeTitleBars` | `true` | Same as the tray menu item. |
-| `squareCorners` | `true` | Same as the tray menu item. |
 | `keepTitleBarApps` | `[]` | Apps that keep their title bar, by exe name (`MyApp.exe`; the `.exe` is optional). |
 | `removeTitleBarApps` | `[]` | Apps that lose their title bar even when it has tabs or buttons in it. The hotkey and the tray menu edit both lists. |
 | `toggleTitleBarHotkey` | `Ctrl+Alt+Shift+T` | Modifiers plus a letter, digit, F1-F24, Numpad0-9 or a named key like `PageUp`. Empty disables it. |
@@ -100,6 +98,7 @@ FancyBorderless.exe --version
 
 ## Good to know
 
+- For square corners on Windows 11, turn on **Disable round corners when window is snapped** in FancyZones' settings. Snapped windows then meet the zone edges exactly.
 - Title bars are tucked above the screen in zones along the top of a monitor, which is where most layouts put their main zones. In lower zones, windows that insist on their own title bar keep it.
 - It never touches game memory or injects code.
 - It has been developed and tested at 100% display scaling. Reports from other scaling levels are very welcome.
