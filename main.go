@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	version     = "1.3.1"
+	version     = "1.3.2"
 	windowClass = "FancyBorderless"
 	restartFlag = "--restart"
 )
@@ -320,10 +320,13 @@ func list() int {
 		style := windowStyle(h)
 		titleBar := "drawn by Windows"
 		if !drawsTitleBar(h) {
-			if bar := ownTitleBarHeight(h); bar > 0 {
+			switch bar, busy := ownTitleBar(h); {
+			case busy:
+				titleBar = fmt.Sprintf("drawn by the app, %d px, with tabs or buttons in it", bar)
+			case bar > 0:
 				titleBar = fmt.Sprintf("drawn by the app, %d px", bar)
-			} else {
-				titleBar = "none, or the app's own with controls in it"
+			default:
+				titleBar = "none"
 			}
 		}
 		fmt.Printf("  %s %q zone %s\n    window %v, visible %v, resize border %v, popup %v\n    title bar: %s\n",

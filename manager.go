@@ -32,9 +32,11 @@ type window struct {
 	bits uint64 // zone marker when last evaluated
 	// titleBar: Windows draws a title bar above the window's content.
 	titleBar bool
-	// ownBar: height of a plain title bar the app draws itself (WPF and UWP apps, for example).
-	// Browsers draw tabs there instead and get 0, so they're left alone.
-	ownBar int32
+	// ownBar: height of a title bar the app draws itself, plain (WPF and UWP apps, for
+	// example) or busy with tabs and buttons (browsers). Busy ones are kept unless the user
+	// picks the app with the hotkey or the tray menu.
+	ownBar  int32
+	busyBar bool
 	// fixedSize: the window had no resize border of its own. FancyZones never resizes such
 	// windows and neither do we; games in windowed mode are usually like this, and most of
 	// them keep drawing at their resolution, so a smaller window would cut the picture off.
@@ -335,13 +337,7 @@ func (m *manager) track(h uintptr) *window {
 	w.fixedSize = windowStyle(h)&wsThickFrame == 0
 	w.offset = getProp(h, propHidden) != 0
 	if !w.titleBar {
-		// An app's own bar is part of its content and can't be removed, only hidden above
-		// the screen.
-		w.ownBar = ownTitleBarHeight(h)
-		w.offset = w.ownBar > 0
-		if w.offset {
-			log.Printf("%s draws its own %d px title bar; hiding it above the screen", m.describe(h, w), w.ownBar)
-		}
+		m.measureOwnBar(h, w)
 	} else if windowStyle(h)&wsPopup != 0 {
 		// A popup without its frame no longer qualifies for FancyZones, which would then stop
 		// moving it, so its title bar is hidden above the screen instead of removed.
@@ -351,8 +347,33 @@ func (m *manager) track(h uintptr) *window {
 	return w
 }
 
+// measureOwnBar looks for a title bar the app draws itself. It's part of the app's content,
+// so it can't be removed, only hidden above the screen.
+func (m *manager) measureOwnBar(h uintptr, w *window) {
+	w.ownBar, w.busyBar = ownTitleBar(h)
+	w.offset = w.ownBar > 0
+	switch {
+	case w.busyBar:
+		log.Printf("%s draws its own %d px title bar with tabs or buttons in it", m.describe(h, w), w.ownBar)
+	case w.offset:
+		log.Printf("%s draws its own %d px title bar; hiding it above the screen", m.describe(h, w), w.ownBar)
+	}
+}
+
+// keepsTitleBar is the user's choice for an app, or else the default: a title bar with tabs
+// or buttons in it stays, any other goes.
+func (m *manager) keepsTitleBar(exe string, busyBar bool) bool {
+	switch {
+	case matchesApp(m.cfg.KeepTitleBarApps, exe):
+		return true
+	case matchesApp(m.cfg.RemoveTitleBarApps, exe):
+		return false
+	}
+	return busyBar
+}
+
 func (m *manager) wantsBorderless(w *window) bool {
-	return m.cfg.RemoveTitleBars && (w.titleBar || w.ownBar > 0) && !matchesApp(m.cfg.KeepTitleBarApps, w.exe)
+	return m.cfg.RemoveTitleBars && (w.titleBar || w.ownBar > 0) && !m.keepsTitleBar(w.exe, w.busyBar)
 }
 
 func (m *manager) handleSnapped(h uintptr, w *window, bits uint64) {
@@ -455,9 +476,10 @@ func contentRect(h uintptr, w *window) rect {
 }
 
 // titleBarAboveScreen reports whether a window's top edge is above its monitor's work area.
+// A maximized window's edge always is, by its invisible border, and is left as it is.
 func titleBarAboveScreen(h uintptr) bool {
 	mi, ok := monitorInfo(monitorFromWindow(h))
-	return ok && windowRect(h).Top < mi.Work.Top
+	return ok && !isZoomed(h) && windowRect(h).Top < mi.Work.Top
 }
 
 // bringTitleBarBack moves a window down if its title bar is above the screen.
@@ -538,9 +560,9 @@ func (m *manager) allow(h uintptr, w *window) bool {
 
 // strip removes the title bar and border and moves the window to target in the same step,
 // so the program is resized only once.
-func (m *manager) strip(h uintptr, w *window, target rect) bool {
+func (m *manager) strip(h uintptr, w *window, target rect) {
 	if !m.allow(h, w) {
-		return false
+		return
 	}
 	style, ex := windowStyle(h), windowExStyle(h)
 	if !w.stripped {
@@ -548,7 +570,7 @@ func (m *manager) strip(h uintptr, w *window, target rect) bool {
 	}
 	if err := setStyles(h, style&^frameStyles, ex&^frameExStyles); err != nil {
 		m.markBroken(h, w, "removing the title bar", err)
-		return false
+		return
 	}
 	if m.cfg.SquareCorners {
 		setCornerPreference(h, dwmwcpDoNotRound)
@@ -558,10 +580,19 @@ func (m *manager) strip(h uintptr, w *window, target rect) bool {
 	setProp(h, propSavedStyle, uintptr(w.origStyle)<<32|uintptr(w.origExStyle))
 	if err := setWindowPos(h, target, swpQuiet|swpFrameChanged); err != nil {
 		m.markBroken(h, w, "resizing", err)
-		return false
+		return
+	}
+	// Apps that draw their own frame (most browsers do) work out their borders themselves and
+	// keep them without a frame style, which would leave a gap at the sides. A new window can
+	// look like a normal one for a moment while it's being set up, so this is checked on the
+	// result. A gap on one side only is a scroll bar.
+	if win, client := windowRect(h), clientScreenRect(h); client.Left > win.Left && client.Right < win.Right {
+		m.restore(h, w, "it draws its own frame")
+		w.titleBar = false
+		m.measureOwnBar(h, w)
+		return
 	}
 	log.Printf("%s: title bar removed, now %v", m.describe(h, w), target)
-	return true
 }
 
 func (m *manager) fit(h uintptr, w *window, target rect) {
@@ -720,18 +751,34 @@ func (m *manager) applyCorners() {
 
 // setKeep remembers whether an app keeps its title bar and applies it to its open windows.
 func (m *manager) setKeep(exeName string, keep bool) {
-	list := []string{}
-	for _, e := range m.cfg.KeepTitleBarApps {
-		if !matchesApp([]string{e}, exeName) {
-			list = append(list, e)
+	without := func(list []string) []string {
+		out := []string{}
+		for _, e := range list {
+			if !matchesApp([]string{e}, exeName) {
+				out = append(out, e)
+			}
 		}
+		return out
 	}
+	m.cfg.KeepTitleBarApps, m.cfg.RemoveTitleBarApps = without(m.cfg.KeepTitleBarApps), without(m.cfg.RemoveTitleBarApps)
 	if keep {
-		list = append(list, exeName)
+		m.cfg.KeepTitleBarApps = append(m.cfg.KeepTitleBarApps, exeName)
+	} else {
+		m.cfg.RemoveTitleBarApps = append(m.cfg.RemoveTitleBarApps, exeName)
 	}
-	m.cfg.KeepTitleBarApps = list
 	m.saveConfig()
 	m.refitAll()
+}
+
+// appKeepsTitleBar is keepsTitleBar for an app rather than a window, for the tray menu.
+func (m *manager) appKeepsTitleBar(exeName string) bool {
+	busy := false
+	for h, w := range m.windows {
+		if w.busyBar && matchesApp([]string{exeName}, w.exe) && isWindow(h) {
+			busy = true
+		}
+	}
+	return m.keepsTitleBar(exeName, busy)
 }
 
 func (m *manager) registerHotkeys() {
@@ -784,7 +831,7 @@ func (m *manager) toggleTitleBar() {
 		return
 	}
 	if !w.titleBar && w.ownBar == 0 {
-		m.notify(name + " draws its own title bar with controls in it, so FancyBorderless leaves it alone.")
+		m.notify(name + " has no title bar to remove.")
 		return
 	}
 	m.setKeep(exeName, false)
@@ -793,9 +840,8 @@ func (m *manager) toggleTitleBar() {
 	case bits != 0:
 		m.handleSnapped(h, w, bits)
 	case w.titleBar:
-		if m.strip(h, w, visibleRect(h)) {
-			w.manual = true
-		}
+		m.strip(h, w, visibleRect(h))
+		w.manual = w.stripped
 	}
 	switch {
 	case w.stripped:
