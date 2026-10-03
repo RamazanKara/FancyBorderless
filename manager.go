@@ -277,6 +277,11 @@ func (m *manager) track(h uintptr) *window {
 		if w.offset {
 			log.Printf("%s draws its own %d px title bar; hiding it above the screen", m.describe(h, w), w.ownBar)
 		}
+	} else if windowStyle(h)&wsPopup != 0 {
+		// A popup without its frame no longer qualifies for FancyZones, which would then stop
+		// moving it, so its title bar is hidden above the screen instead of removed.
+		w.offset = true
+		log.Printf("%s is a popup window; hiding its title bar above the screen", m.describe(h, w))
 	}
 	m.windows[h] = w
 	return w
@@ -292,9 +297,7 @@ func (m *manager) handleSnapped(h uintptr, w *window, bits uint64) {
 		return
 	}
 	style := windowStyle(h)
-	// A popup without its frame no longer qualifies for FancyZones, which would then stop
-	// moving it on layout changes.
-	if style&wsPopup != 0 || isZoomed(h) {
+	if isZoomed(h) {
 		return
 	}
 	zone, ok := m.zoneRect(h, bits)
