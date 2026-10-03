@@ -164,5 +164,9 @@ func parseHotkey(spec string) (mods, vk uint32, err error) {
 			vk = k
 		}
 	}
+	if mods == 0 {
+		// A hotkey without a modifier would take that key away from every other app.
+		return 0, 0, fmt.Errorf("%q needs Ctrl, Alt, Shift or Win", spec)
+	}
 	return mods, vk, nil
 }

@@ -84,7 +84,8 @@ func (f *fancyZones) load() error {
 	if err := readJSON(paths[0], &applied); err != nil {
 		return err
 	}
-	if err := readJSON(paths[1], &custom); err != nil {
+	// FancyZones only writes custom layouts once one is saved in its editor.
+	if err := readJSON(paths[1], &custom); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	f.applied = applied.Layouts

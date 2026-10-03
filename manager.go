@@ -5,12 +5,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"time"
 )
 
 const (
-	timerTick  = 1
+	// Timer ids. Windows are evaluated on a timer of their own, with the window handle as its
+	// id; handles are never this small.
 	timerScan  = 2
 	timerRefit = 3
 
@@ -45,10 +47,12 @@ type window struct {
 	origExStyle uint32
 	stripped    bool // title bar and border removed by us
 	strippedAt  time.Time
-	refusals    int  // times the program put its frame back right away
-	offset      bool // title bar kept but hidden above the screen (enforced frame, or the app's own bar)
-	manual      bool // title bar removed with the hotkey on a window that isn't snapped
-	broken      bool // Windows refused a change, usually because the window runs elevated
+	refusals    int    // times the program put its frame back right away
+	offset      bool   // title bar kept but hidden (enforced frame, popup, or the app's own bar)
+	hidden      bool   // title bar clipped off by us: window region set, frame and backdrop off
+	backdrop    uint32 // the backdrop it had before
+	manual      bool   // title bar removed with the hotkey on a window that isn't snapped
+	broken      bool   // Windows refused a change, usually because the window runs elevated
 	gaveUp      bool
 	changes     []time.Time
 }
@@ -64,10 +68,10 @@ type manager struct {
 	desktop  string
 	layouts  map[uintptr]zoneLayout // per monitor handle
 	windows  map[uintptr]*window
-	due      map[uintptr]time.Time
-	ticking  bool
 	reported map[string]bool
-	hooks    []uintptr
+	// framedApps won't do without their frame (see rememberFrame), by exe path.
+	framedApps map[string]bool
+	hooks      []uintptr
 	// moveHooks listen for window moves of the processes we manage, one hook per process.
 	// A system-wide move hook would also fire on every mouse movement.
 	moveHooks map[uint32]uintptr
@@ -75,13 +79,13 @@ type manager struct {
 
 func newManager() *manager {
 	return &manager{
-		ownPID:    uint32(os.Getpid()),
-		fz:        newFancyZones(),
-		layouts:   map[uintptr]zoneLayout{},
-		windows:   map[uintptr]*window{},
-		due:       map[uintptr]time.Time{},
-		reported:  map[string]bool{},
-		moveHooks: map[uint32]uintptr{},
+		ownPID:     uint32(os.Getpid()),
+		fz:         newFancyZones(),
+		layouts:    map[uintptr]zoneLayout{},
+		windows:    map[uintptr]*window{},
+		reported:   map[string]bool{},
+		framedApps: map[string]bool{},
+		moveHooks:  map[uint32]uintptr{},
 	}
 }
 
@@ -123,33 +127,40 @@ func (m *manager) watchMoves(pid uint32) {
 }
 
 func (m *manager) onEvent(event uint32, h uintptr) {
-	if event == eventObjectLocationChange {
-		if _, ok := m.windows[h]; !ok {
+	switch event {
+	case eventObjectShow:
+		// Tooltips, menus and the controls inside windows show all the time; only windows
+		// FancyZones could snap matter.
+		if rootWindow(h) != h || windowExStyle(h)&wsExToolWindow != 0 {
+			return
+		}
+	case eventObjectLocationChange:
+		// Moves of windows we manage, and of other windows of the same app once FancyZones
+		// snaps them (it doesn't always write its files for those).
+		if _, ok := m.windows[h]; !ok && zoneBits(h) == 0 {
 			return
 		}
 	}
 	m.schedule(h, settleDelay)
 }
 
-// schedule evaluates a window after a delay; the timer only runs while something is due.
+// schedule evaluates a window after a delay. Scheduling it again before then restarts the
+// wait, so a burst of moves leads to one evaluation.
 func (m *manager) schedule(h uintptr, delay time.Duration) {
-	m.due[h] = time.Now().Add(delay)
-	if !m.ticking {
-		procSetTimer.Call(m.hwnd, timerTick, 50, 0)
-		m.ticking = true
-	}
+	procSetTimer.Call(m.hwnd, h, uintptr(delay.Milliseconds()), 0)
 }
 
 func (m *manager) onTimer(id uintptr) {
 	switch id {
-	case timerTick:
-		m.tick()
 	case timerScan:
 		m.scan()
 	case timerRefit:
 		procKillTimer.Call(m.hwnd, timerRefit)
 		m.layouts = map[uintptr]zoneLayout{}
 		m.refitAll()
+	default:
+		procKillTimer.Call(m.hwnd, id)
+		m.evaluate(id)
 	}
 }
 
@@ -158,29 +169,12 @@ func (m *manager) scheduleRefit() {
 	procSetTimer.Call(m.hwnd, timerRefit, 500, 0)
 }
 
-func (m *manager) tick() {
-	now := time.Now()
-	for h, t := range m.due {
-		if now.Before(t) {
-			continue
-		}
-		delete(m.due, h)
-		m.evaluate(h)
-	}
-	if len(m.due) == 0 {
-		procKillTimer.Call(m.hwnd, timerTick)
-		m.ticking = false
-	}
-}
-
-// onFolderChanged runs when Windows reports a write in FancyZones' folder or in ours. In
-// FancyZones' folder that's a layout switch or a snap: FancyZones records every snap in
-// app-zone-history.json, so windows snapped with the keyboard are picked up right away.
-func (m *manager) onFolderChanged(fancyZones bool) {
+// onFancyZonesChanged runs when FancyZones writes to its folder: a layout switch or a snap.
+// FancyZones records snaps in app-zone-history.json, so windows snapped with the keyboard
+// are usually picked up right away.
+func (m *manager) onFancyZonesChanged() {
 	m.reloadIfChanged()
-	if fancyZones {
-		m.findNewlySnapped()
-	}
+	m.findNewlySnapped()
 }
 
 // findNewlySnapped looks for snapped windows we don't know yet. Windows we already manage
@@ -206,11 +200,11 @@ func (m *manager) scan() {
 	for h, w := range m.windows {
 		if !isWindow(h) {
 			delete(m.windows, h)
-			delete(m.due, h)
 			continue
 		}
 		pids[w.pid] = true
-		if zoneBits(h) != w.bits {
+		// Some apps take the region off when they redraw their frame; it's put back here.
+		if zoneBits(h) != w.bits || w.hidden && !hasRegion(h) {
 			m.schedule(h, 0)
 		}
 	}
@@ -241,14 +235,26 @@ func (m *manager) reloadIfChanged() {
 }
 
 func (m *manager) reloadConfig() {
+	first := m.cfgStamp == ""
+	m.cfgStamp = fileStamp(configPath)
 	cfg, err := loadConfig()
 	if err != nil {
-		log.Printf("settings: %v; using the defaults", err)
+		log.Printf("settings: %v", err)
+		if !first {
+			// A typo shouldn't throw away the app lists: carry on with what was loaded.
+			m.notify("The settings file has an error, so FancyBorderless keeps its current settings. The log has details.")
+			return
+		}
 		beep()
 	}
+	m.applyConfig(cfg)
+	log.Print("settings loaded")
+}
+
+// applyConfig switches to new settings and brings the windows in line with them.
+func (m *manager) applyConfig(cfg config) {
 	old := m.cfg
 	m.cfg = cfg
-	m.cfgStamp = fileStamp(configPath)
 	m.registerHotkeys()
 	if old.RemoveTitleBars && !cfg.RemoveTitleBars {
 		m.restoreAll("turned off")
@@ -259,7 +265,6 @@ func (m *manager) reloadConfig() {
 		m.findNewlySnapped()
 	}
 	m.updateTrayIcon()
-	log.Print("settings loaded")
 }
 
 func (m *manager) saveConfig() {
@@ -313,7 +318,7 @@ func (m *manager) isCandidate(h uintptr) bool {
 	if windowStyle(h)&wsChild != 0 || windowExStyle(h)&wsExToolWindow != 0 {
 		return false
 	}
-	return !isCloaked(h) && windowPID(h) != m.ownPID
+	return !isCloaked(h) && windowPID(h) != m.ownPID && !isHung(h)
 }
 
 // track measures a window the first time it's seen, while it still has its own frame, or
@@ -330,20 +335,21 @@ func (m *manager) track(h uintptr) *window {
 	}
 	w.titleBar = drawsTitleBar(h)
 	w.fixedSize = windowStyle(h)&wsThickFrame == 0
-	w.offset = getProp(h, propHidden) != 0
+	w.hidden = getProp(h, propHidden) != 0 // by an earlier FancyBorderless
+	w.offset = w.hidden || getProp(h, propKeepsFrame) != 0 || m.framedApps[w.exe]
 	if !w.titleBar {
 		m.measureOwnBar(h, w)
 	} else if windowStyle(h)&wsPopup != 0 {
 		// A popup without its frame no longer qualifies for FancyZones, which would then stop
-		// moving it, so its title bar is hidden above the screen instead of removed.
+		// moving it, so its title bar is hidden instead of removed.
 		w.offset = true
-		log.Printf("%s is a popup window; hiding its title bar above the screen", m.describe(h, w))
+		log.Printf("%s is a popup window; hiding its title bar", m.describe(h, w))
 	}
 	return w
 }
 
 // measureOwnBar looks for a title bar the app draws itself. It's part of the app's content,
-// so it can't be removed, only hidden above the screen.
+// so it can't be removed, only hidden.
 func (m *manager) measureOwnBar(h uintptr, w *window) {
 	w.ownBar, w.busyBar = ownTitleBar(h)
 	w.offset = w.ownBar > 0
@@ -351,7 +357,7 @@ func (m *manager) measureOwnBar(h uintptr, w *window) {
 	case w.busyBar:
 		log.Printf("%s draws its own %d px title bar with tabs or buttons in it", m.describe(h, w), w.ownBar)
 	case w.offset:
-		log.Printf("%s draws its own %d px title bar; hiding it above the screen", m.describe(h, w), w.ownBar)
+		log.Printf("%s draws its own %d px title bar; hiding it", m.describe(h, w), w.ownBar)
 	}
 }
 
@@ -380,6 +386,10 @@ func (m *manager) handleSnapped(h uintptr, w *window, bits uint64) {
 	m.watchMoves(w.pid)
 	style := windowStyle(h)
 	if isZoomed(h) {
+		// A region would cut a maximized window down to its old size.
+		if w.hidden {
+			m.unhide(h, w)
+		}
 		return
 	}
 	zone, ok := m.zoneRect(h, bits)
@@ -430,17 +440,51 @@ func (m *manager) noteRefusal(h uintptr, w *window) {
 	}
 	w.offset, w.stripped = true, false
 	removeProp(h, propSavedStyle)
-	setProp(h, propHidden, 1)
-	log.Printf("%s keeps putting its title bar back; hiding it above the screen instead", m.describe(h, w))
+	m.rememberFrame(h, w)
+	log.Printf("%s keeps putting its title bar back; hiding it instead", m.describe(h, w))
 }
 
-// placeClient keeps the title bar and moves the window so the content below it covers the
-// zone, with the frame sticking out around it. In a zone along the top of the monitor the
-// title bar ends up above the screen, out of sight.
+// rememberFrame notes that a program won't do without its frame, on the window (which keeps
+// the note through a restart of FancyBorderless) and for the app until FancyBorderless exits,
+// so it isn't stripped again: some games take every attempt as a new window size.
+func (m *manager) rememberFrame(h uintptr, w *window) {
+	setProp(h, propKeepsFrame, 1)
+	m.framedApps[w.exe] = true
+}
+
+// placeClient keeps the title bar but moves the window so the content below it covers the
+// zone, and clips everything around the content off with a window region, in any zone.
+// Windows draws its frame and backdrop on top of any region, so those are switched off while
+// the window is clipped. The region goes on before the window moves, so the title bar never
+// shows outside the zone on its way, on a monitor above for instance.
 func (m *manager) placeClient(h uintptr, w *window, zone rect) {
-	mi, ok := monitorInfo(monitorFromWindow(h))
-	if !ok || zone.Top != mi.Monitor.Top {
-		m.reportOnce(fmt.Sprintf("offset:%x", h), "%s: its title bar can only be hidden in zones along the top of the screen", m.describe(h, w))
+	if !w.hidden {
+		if hasRegion(h) {
+			// The app shapes its window itself (a skinned player, say); leave that to it.
+			m.reportOnce(fmt.Sprintf("region:%x", h), "%s shapes its own window, so its title bar stays", m.describe(h, w))
+			return
+		}
+		w.backdrop = backdrop(h)
+	}
+	clip := func() bool {
+		if err := clipTo(h, contentRect(h, w)); err != nil {
+			m.unhide(h, w)
+			m.markBroken(h, w, "hiding the title bar", err)
+			return false
+		}
+		return true
+	}
+	if !clip() {
+		return
+	}
+	if frameDrawn(h) {
+		setFrameDrawing(h, false)
+	}
+	if backdrop(h) != dwmsbtNone {
+		setBackdrop(h, dwmsbtNone)
+	}
+	// Apps that redraw their frame when its drawing changes may drop the region meanwhile.
+	if !clip() {
 		return
 	}
 	win, content := windowRect(h), contentRect(h, w)
@@ -448,36 +492,54 @@ func (m *manager) placeClient(h uintptr, w *window, zone rect) {
 	if w.fixedSize {
 		target = rect{zone.Left, zone.Top, zone.Left + content.width(), zone.Top + content.height()}
 	}
-	m.fit(h, w, rect{
+	target = rect{
 		Left:   target.Left - (content.Left - win.Left),
 		Top:    target.Top - (content.Top - win.Top),
 		Right:  target.Right + (win.Right - content.Right),
 		Bottom: target.Bottom + (win.Bottom - content.Bottom),
-	})
-}
-
-// contentRect is the part of the window below its title bar, in screen coordinates.
-func contentRect(h uintptr, w *window) rect {
-	if w.ownBar > 0 {
-		r := visibleRect(h)
-		r.Top += w.ownBar
-		return r
 	}
-	return clientScreenRect(h)
+	if target.width() != win.width() || target.height() != win.height() {
+		// Resize in place first: some apps (Chromium-based ones) drop the region when their
+		// size changes, and that mustn't happen with the title bar already above the zone.
+		m.fit(h, w, rect{win.Left, win.Top, win.Left + target.width(), win.Top + target.height()})
+		if !clip() {
+			return
+		}
+	}
+	m.fit(h, w, target)
+	if !clip() {
+		return
+	}
+	if !w.hidden {
+		w.hidden = true
+		setProp(h, propHidden, 1)
+	}
 }
 
-// titleBarAboveScreen reports whether a window's top edge is above its monitor's work area.
-// A maximized window's edge always is, by its invisible border, and is left as it is.
-func titleBarAboveScreen(h uintptr) bool {
-	mi, ok := monitorInfo(monitorFromWindow(h))
-	return ok && !isZoomed(h) && windowRect(h).Top < mi.Work.Top
+// unhide undoes the clipping without moving the window.
+func (m *manager) unhide(h uintptr, w *window) {
+	unclipWindow(h)
+	setBackdrop(h, w.backdrop)
+	setFrameDrawing(h, true)
+	w.hidden = false
+	removeProp(h, propHidden)
+}
+
+// contentRect is the part of the window below its title bar, in screen coordinates. It goes
+// by the client area, which stays the same when Windows' frame drawing is switched off.
+func contentRect(h uintptr, w *window) rect {
+	r := clientScreenRect(h)
+	if w.ownBar > 0 {
+		r.Top = visibleRect(h).Top + w.ownBar
+	}
+	return r
 }
 
 // bringTitleBarBack moves a window down if its title bar is above the screen.
 func bringTitleBarBack(h uintptr) {
 	mi, ok := monitorInfo(monitorFromWindow(h))
 	r := windowRect(h)
-	if !ok || r.Top >= mi.Work.Top {
+	if !ok || isZoomed(h) || r.Top >= mi.Work.Top {
 		return
 	}
 	d := mi.Work.Top - r.Top
@@ -569,6 +631,15 @@ func (m *manager) strip(h uintptr, w *window, target rect) {
 		m.markBroken(h, w, "resizing", err)
 		return
 	}
+	// Some games size their window right back to what it is with a frame (in the call above,
+	// before it returns) and would draw their picture into a window bigger than it. They get
+	// the frame back straight away and their title bar is clipped off instead.
+	if r := windowRect(h); w.fixedSize && (r.width()-target.width() > 2 || r.height()-target.height() > 2) {
+		m.restore(h, w, "it sizes its window for its frame")
+		w.offset = true
+		m.rememberFrame(h, w)
+		return
+	}
 	// Apps that draw their own frame (most browsers do) work out their borders themselves and
 	// keep them without a frame style, which would leave a gap at the sides. A new window can
 	// look like a normal one for a moment while it's being set up, so this is checked on the
@@ -596,20 +667,30 @@ func (m *manager) showTitleBar(h uintptr, w *window, why string) {
 	if w.stripped {
 		m.restore(h, w, why)
 	}
-	if !w.offset || !titleBarAboveScreen(h) {
+	if !w.hidden {
 		return
 	}
-	// A resizable window that is still snapped goes back to exactly its zone; anything else
-	// is just moved down so its title bar is on screen again.
-	if bits := zoneBits(h); bits != 0 && !w.fixedSize {
+	// The window moves back first, while it's still clipped, so the title bar doesn't show
+	// outside its zone on the way. A snapped window moves down by its title bar; anything
+	// else only if its title bar is above the screen.
+	bits := zoneBits(h)
+	if bits != 0 {
+		r := windowRect(h)
+		bar := contentRect(h, w).Top - r.Top
+		setWindowPos(h, rect{r.Left, r.Top + bar, r.Right, r.Bottom + bar}, swpQuiet)
+	} else {
+		bringTitleBarBack(h)
+	}
+	m.unhide(h, w)
+	log.Printf("%s: title bar shown again (%s)", m.describe(h, w), why)
+	// A resizable window then fits its zone exactly again, frame included.
+	if bits != 0 && !w.fixedSize {
 		if zone, ok := m.zoneRect(h, bits); ok {
 			if err := setVisibleRect(h, zone); err != nil {
 				log.Printf("%s: %v", m.describe(h, w), err)
 			}
-			return
 		}
 	}
-	bringTitleBarBack(h)
 }
 
 func (m *manager) restore(h uintptr, w *window, why string) {
@@ -622,6 +703,9 @@ func (m *manager) restore(h uintptr, w *window, why string) {
 	}
 	w.stripped, w.manual = false, false
 	removeProp(h, propSavedStyle)
+	// The window keeps its outer size. Growing a game's window by the frame instead would
+	// keep its picture whole, but some games remember that size and keep it once the frame
+	// is gone again, spilling over into the next zone.
 	if err := setVisibleRect(h, visible); err != nil {
 		log.Printf("%s: moving after restoring the title bar: %v", m.describe(h, w), err)
 	}
@@ -630,7 +714,7 @@ func (m *manager) restore(h uintptr, w *window, why string) {
 
 func (m *manager) restoreAll(why string) {
 	for h, w := range m.windows {
-		if isWindow(h) {
+		if isWindow(h) && !isHung(h) {
 			m.showTitleBar(h, w, why)
 		}
 	}
@@ -702,47 +786,37 @@ func (m *manager) toggleStartWithWindows() {
 }
 
 func (m *manager) setEnabled(on bool) {
-	m.cfg.RemoveTitleBars = on
+	cfg := m.cfg
+	cfg.RemoveTitleBars = on
+	m.applyConfig(cfg)
 	m.saveConfig()
-	if on {
-		m.refitAll()
-		m.scan()
-	} else {
-		m.restoreAll("turned off")
-	}
-	m.updateTrayIcon()
 }
 
 // setKeep remembers whether an app keeps its title bar and applies it to its open windows.
+// Only a choice that differs from the app's default is written down, so the lists stay short.
 func (m *manager) setKeep(exeName string, keep bool) {
-	without := func(list []string) []string {
-		out := []string{}
-		for _, e := range list {
-			if !matchesApp([]string{e}, exeName) {
-				out = append(out, e)
-			}
-		}
-		return out
-	}
-	m.cfg.KeepTitleBarApps, m.cfg.RemoveTitleBarApps = without(m.cfg.KeepTitleBarApps), without(m.cfg.RemoveTitleBarApps)
-	if keep {
+	isApp := func(e string) bool { return matchesApp([]string{e}, exeName) }
+	m.cfg.KeepTitleBarApps = slices.DeleteFunc(m.cfg.KeepTitleBarApps, isApp)
+	m.cfg.RemoveTitleBarApps = slices.DeleteFunc(m.cfg.RemoveTitleBarApps, isApp)
+	switch busy := m.hasBusyBar(exeName); {
+	case keep && !busy:
 		m.cfg.KeepTitleBarApps = append(m.cfg.KeepTitleBarApps, exeName)
-	} else {
+	case !keep && busy:
 		m.cfg.RemoveTitleBarApps = append(m.cfg.RemoveTitleBarApps, exeName)
 	}
 	m.saveConfig()
 	m.refitAll()
 }
 
-// appKeepsTitleBar is keepsTitleBar for an app rather than a window, for the tray menu.
-func (m *manager) appKeepsTitleBar(exeName string) bool {
-	busy := false
+// hasBusyBar reports whether an open window of the app has tabs or buttons in its title bar,
+// which it then keeps by default.
+func (m *manager) hasBusyBar(exeName string) bool {
 	for h, w := range m.windows {
 		if w.busyBar && matchesApp([]string{exeName}, w.exe) && isWindow(h) {
-			busy = true
+			return true
 		}
 	}
-	return m.keepsTitleBar(exeName, busy)
+	return false
 }
 
 func (m *manager) registerHotkeys() {
@@ -788,7 +862,7 @@ func (m *manager) toggleTitleBar() {
 	name := displayName(exeName)
 	w.broken, w.changes, w.gaveUp = false, nil, false
 
-	if w.stripped || (w.offset && titleBarAboveScreen(h)) {
+	if w.stripped || w.hidden {
 		m.setKeep(exeName, true)
 		m.showTitleBar(h, w, "hotkey")
 		m.notify(name + " keeps its title bar.")
@@ -810,14 +884,12 @@ func (m *manager) toggleTitleBar() {
 	switch {
 	case w.stripped:
 		m.notify(name + ": title bar removed.")
-	case w.offset && titleBarAboveScreen(h):
-		m.notify(name + ": title bar hidden above the screen.")
+	case w.hidden:
+		m.notify(name + ": title bar hidden.")
 	case w.broken:
 		m.notify("Windows refused to change " + name + ". The log has details.")
-	case w.ownBar > 0 && bits == 0:
-		m.notify("Snap " + name + " into a zone along the top of the screen to hide its title bar.")
-	case w.offset:
-		m.notify(name + "'s title bar can only be hidden in zones along the top of the screen.")
+	case w.offset && bits == 0:
+		m.notify("Snap " + name + " into a zone to hide its title bar.")
 	default:
 		m.notify("Couldn't remove the title bar of " + name + ". The log has details.")
 	}

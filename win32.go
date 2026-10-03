@@ -10,6 +10,7 @@ import (
 var (
 	user32   = syscall.NewLazyDLL("user32.dll")
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
+	gdi32    = syscall.NewLazyDLL("gdi32.dll")
 	dwmapi   = syscall.NewLazyDLL("dwmapi.dll")
 	shell32  = syscall.NewLazyDLL("shell32.dll")
 
@@ -33,20 +34,25 @@ var (
 	procGetForegroundWindow           = user32.NewProc("GetForegroundWindow")
 	procGetMonitorInfoW               = user32.NewProc("GetMonitorInfoW")
 	procGetPropW                      = user32.NewProc("GetPropW")
+	procGetSystemMetrics              = user32.NewProc("GetSystemMetrics")
 	procGetWindowLongPtrW             = user32.NewProc("GetWindowLongPtrW")
 	procGetWindowRect                 = user32.NewProc("GetWindowRect")
+	procGetWindowRgnBox               = user32.NewProc("GetWindowRgnBox")
 	procGetWindowTextW                = user32.NewProc("GetWindowTextW")
 	procGetWindowThreadProcessId      = user32.NewProc("GetWindowThreadProcessId")
+	procIsHungAppWindow               = user32.NewProc("IsHungAppWindow")
 	procIsIconic                      = user32.NewProc("IsIconic")
 	procIsWindow                      = user32.NewProc("IsWindow")
 	procIsWindowVisible               = user32.NewProc("IsWindowVisible")
 	procIsZoomed                      = user32.NewProc("IsZoomed")
 	procKillTimer                     = user32.NewProc("KillTimer")
 	procLoadIconW                     = user32.NewProc("LoadIconW")
+	procLoadImageW                    = user32.NewProc("LoadImageW")
 	procMessageBeep                   = user32.NewProc("MessageBeep")
 	procMonitorFromWindow             = user32.NewProc("MonitorFromWindow")
 	procMsgWaitForMultipleObjectsEx   = user32.NewProc("MsgWaitForMultipleObjectsEx")
 	procPeekMessageW                  = user32.NewProc("PeekMessageW")
+	procPhysicalToLogicalPointForPMD  = user32.NewProc("PhysicalToLogicalPointForPerMonitorDPI")
 	procPostMessageW                  = user32.NewProc("PostMessageW")
 	procPostQuitMessage               = user32.NewProc("PostQuitMessage")
 	procRegisterClassExW              = user32.NewProc("RegisterClassExW")
@@ -61,6 +67,7 @@ var (
 	procSetWinEventHook               = user32.NewProc("SetWinEventHook")
 	procSetWindowLongPtrW             = user32.NewProc("SetWindowLongPtrW")
 	procSetWindowPos                  = user32.NewProc("SetWindowPos")
+	procSetWindowRgn                  = user32.NewProc("SetWindowRgn")
 	procTrackPopupMenu                = user32.NewProc("TrackPopupMenu")
 	procTranslateMessage              = user32.NewProc("TranslateMessage")
 	procUnhookWinEvent                = user32.NewProc("UnhookWinEvent")
@@ -74,7 +81,11 @@ var (
 	procQueryFullProcessImageNameW  = kernel32.NewProc("QueryFullProcessImageNameW")
 	procSetLastError                = kernel32.NewProc("SetLastError")
 
+	procCreateRectRgn = gdi32.NewProc("CreateRectRgn")
+	procDeleteObject  = gdi32.NewProc("DeleteObject")
+
 	procDwmGetWindowAttribute = dwmapi.NewProc("DwmGetWindowAttribute")
+	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
 
 	procShellExecuteW    = shell32.NewProc("ShellExecuteW")
 	procShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
@@ -108,13 +119,18 @@ const (
 	eddGetDeviceInterfaceName = 1
 	displayDeviceActive       = 1
 
+	dwmwaNCRenderingEnabled  = 1
+	dwmwaNCRenderingPolicy   = 2
 	dwmwaExtendedFrameBounds = 9
 	dwmwaCloaked             = 14
+	dwmwaSystemBackdropType  = 38
+	dwmncrpUseWindowStyle    = 0
+	dwmncrpDisabled          = 1
+	dwmsbtNone               = 1
 
 	processQueryLimitedInformation = 0x1000
 
 	eventSystemMoveSizeEnd    = 0x000B
-	eventObjectDestroy        = 0x8001
 	eventObjectShow           = 0x8002
 	eventObjectLocationChange = 0x800B
 	winEventOutOfContext      = 0x0000
@@ -181,6 +197,8 @@ const (
 	tpmReturnCmd   = 0x0100
 
 	idiApplication     = 32512
+	imageIcon          = 1
+	smCxSmIcon         = 49
 	errorAlreadyExists = 183
 )
 
@@ -280,6 +298,70 @@ func isIconic(h uintptr) bool        { r, _, _ := procIsIconic.Call(h); return r
 func isZoomed(h uintptr) bool        { r, _, _ := procIsZoomed.Call(h); return r != 0 }
 func rootWindow(h uintptr) uintptr   { r, _, _ := procGetAncestor.Call(h, gaRoot); return r }
 func foregroundWindow() uintptr      { r, _, _ := procGetForegroundWindow.Call(); return r }
+
+// isHung reports a window that hasn't answered Windows for a few seconds. Changing its style
+// or position would wait for it, and FancyBorderless with it.
+func isHung(h uintptr) bool { r, _, _ := procIsHungAppWindow.Call(h); return r != 0 }
+
+// clipTo shows only r (screen coordinates) of a window: the rest isn't drawn, and clicks
+// there go to whatever is below. Window regions are in the window's own coordinates, which
+// are logical pixels for apps that Windows scales for display scaling, hence the conversion.
+func clipTo(h uintptr, r rect) error {
+	win := windowRect(h)
+	p := [3]point{{win.Left, win.Top}, {r.Left, r.Top}, {r.Right - 1, r.Bottom - 1}}
+	for i := range p {
+		procPhysicalToLogicalPointForPMD.Call(h, uintptr(unsafe.Pointer(&p[i])))
+	}
+	want := rect{p[1].X - p[0].X, p[1].Y - p[0].Y, p[2].X - p[0].X + 1, p[2].Y - p[0].Y + 1}
+	if have, ok := regionBox(h); ok && have == want {
+		return nil
+	}
+	rgn, _, _ := procCreateRectRgn.Call(uintptr(want.Left), uintptr(want.Top), uintptr(want.Right), uintptr(want.Bottom))
+	if ok, _, err := procSetWindowRgn.Call(h, rgn, 1); ok == 0 {
+		procDeleteObject.Call(rgn)
+		return err
+	}
+	return nil
+}
+
+func unclipWindow(h uintptr) { procSetWindowRgn.Call(h, 0, 1) }
+
+// regionBox is the bounding box of a window's region; false if it has none.
+func regionBox(h uintptr) (rect, bool) {
+	var r rect
+	kind, _, _ := procGetWindowRgnBox.Call(h, uintptr(unsafe.Pointer(&r)))
+	return r, kind != 0 // ERROR (0) means no region
+}
+
+func hasRegion(h uintptr) bool { _, ok := regionBox(h); return ok }
+
+// setFrameDrawing turns the frame Windows draws around a window off or back on. Windows draws
+// it on top of any region; switched off, the frame is part of the window and gets clipped.
+func setFrameDrawing(h uintptr, on bool) {
+	policy := uint32(dwmncrpDisabled)
+	if on {
+		policy = dwmncrpUseWindowStyle
+	}
+	procDwmSetWindowAttribute.Call(h, dwmwaNCRenderingPolicy, uintptr(unsafe.Pointer(&policy)), unsafe.Sizeof(policy))
+}
+
+func frameDrawn(h uintptr) bool {
+	var on int32
+	procDwmGetWindowAttribute.Call(h, dwmwaNCRenderingEnabled, uintptr(unsafe.Pointer(&on)), unsafe.Sizeof(on))
+	return on != 0
+}
+
+// backdrop is the material Windows 11 draws behind a window, like Mica. A region doesn't clip
+// it either, so a clipped window gets none while it's clipped.
+func backdrop(h uintptr) uint32 {
+	var v uint32
+	procDwmGetWindowAttribute.Call(h, dwmwaSystemBackdropType, uintptr(unsafe.Pointer(&v)), unsafe.Sizeof(v))
+	return v
+}
+
+func setBackdrop(h uintptr, v uint32) {
+	procDwmSetWindowAttribute.Call(h, dwmwaSystemBackdropType, uintptr(unsafe.Pointer(&v)), unsafe.Sizeof(v))
+}
 
 func windowStyle(h uintptr) uint32 {
 	r, _, _ := procGetWindowLongPtrW.Call(h, gwlStyle)
@@ -489,8 +571,9 @@ func zoneBits(h uintptr) uint64 {
 // Our own marks on the windows we change. Window properties live with the window, so a new
 // FancyBorderless instance can still undo the changes after the old one was killed.
 var (
-	propSavedStyle = utf16Ptr("FancyBorderless_style")  // original style << 32 | ex-style
-	propHidden     = utf16Ptr("FancyBorderless_hidden") // title bar kept but placed above the screen
+	propSavedStyle = utf16Ptr("FancyBorderless_style")      // original style << 32 | ex-style
+	propHidden     = utf16Ptr("FancyBorderless_hidden")     // title bar kept but clipped off
+	propKeepsFrame = utf16Ptr("FancyBorderless_keepsframe") // the program won't do without its frame
 )
 
 func getProp(h uintptr, name *uint16) uintptr {
