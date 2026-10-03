@@ -49,6 +49,7 @@ Click the tray icon for the settings:
 - Remove title bars (turns everything on or off)
 - Square corners (turns off Windows 11's rounded corners on borderless windows so they meet the zone edges)
 - Start with Windows
+- Run as administrator (needed for games that run as administrator, see below)
 - Keep title bar for (every app that's snapped or that you've excluded; tick an app to keep its title bar)
 - Open settings file, Open log, Exit
 
@@ -58,6 +59,17 @@ Click the tray icon for the settings:
 - Snap it into its zone once. FancyZones remembers the zone and puts the game back there on every launch ("Move newly created windows to their last known zone" in FancyZones' settings).
 - Don't add games to FancyZones' excluded apps, since FancyBorderless only handles windows that FancyZones snaps.
 - Borderless and exclusive fullscreen modes don't work, because FancyZones doesn't snap those windows.
+
+### Games that run as administrator
+
+Some games run as administrator, often because of their anti-cheat (Marvel Rivals does). Windows doesn't let normal programs move or change the windows of administrator programs, so neither FancyZones nor FancyBorderless can touch them at first. If you press the hotkey on such a game, FancyBorderless tells you so.
+
+To make them work:
+
+1. In PowerToys Settings, General tab, turn on **Always run as administrator**. FancyZones needs it to snap the game ([PowerToys docs](https://learn.microsoft.com/windows/powertoys/administrator)).
+2. In FancyBorderless's tray menu, tick **Run as administrator** and confirm the Windows prompt. FancyBorderless restarts with administrator rights.
+
+With both on, **Start with Windows** uses a scheduled task, the same way PowerToys does it, so there's no prompt at every sign-in.
 
 ## Settings file
 
@@ -69,6 +81,7 @@ Everything except the hotkey is in the tray menu. The file is at `%APPDATA%\Fanc
 | `squareCorners` | `true` | Same as the tray menu item. |
 | `keepTitleBarApps` | `[]` | Apps that keep their title bar, by exe name (`Plex.exe`; the `.exe` is optional). The hotkey and the tray menu edit this list. |
 | `toggleTitleBarHotkey` | `Ctrl+Alt+Shift+T` | Modifiers plus a letter, digit, F1-F24, Numpad0-9 or a named key like `PageUp`. Empty disables it. |
+| `runAsAdministrator` | `false` | Same as the tray menu item. |
 
 The log at `%APPDATA%\FancyBorderless\FancyBorderless.log` lists every window FancyBorderless changes and why.
 
@@ -86,7 +99,7 @@ FancyBorderless.exe --version
 
 - Only custom FancyZones layouts are supported.
 - Hiding a title bar above the screen only works in zones along the top of a monitor. In other zones a program that insists on its title bar, or draws its own, keeps it.
-- Windows running as administrator can only be changed if FancyBorderless runs as administrator too. The log says when this happens.
+- Windows that run as administrator need PowerToys and FancyBorderless in administrator mode (see "Games that run as administrator").
 - If FancyBorderless crashes, windows stay borderless until it runs again or you press the hotkey.
 - It never touches game memory or injects code, but anti-cheat systems differ and I can't promise every one of them ignores window style changes.
 - So far it's been tested at 100% display scaling.

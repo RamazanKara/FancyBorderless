@@ -13,6 +13,7 @@ var (
 	shell32  = syscall.NewLazyDLL("shell32.dll")
 
 	procAppendMenuW                   = user32.NewProc("AppendMenuW")
+	procChangeWindowMessageFilterEx   = user32.NewProc("ChangeWindowMessageFilterEx")
 	procClientToScreen                = user32.NewProc("ClientToScreen")
 	procCreatePopupMenu               = user32.NewProc("CreatePopupMenu")
 	procCreateWindowExW               = user32.NewProc("CreateWindowExW")
@@ -134,6 +135,7 @@ const (
 
 	htCaption       = 2
 	smtoAbortIfHung = 0x0002
+	msgfltAllow     = 1
 
 	modAlt      = 0x0001
 	modControl  = 0x0002

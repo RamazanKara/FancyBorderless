@@ -15,6 +15,7 @@ const (
 	menuEnabled = iota + 1
 	menuSquareCorners
 	menuStartup
+	menuAdmin
 	menuSettings
 	menuLog
 	menuExit
@@ -124,6 +125,7 @@ func (m *manager) showMenu() {
 	add(menu, checked(m.cfg.RemoveTitleBars), menuEnabled, "Remove title bars")
 	add(menu, checked(m.cfg.SquareCorners), menuSquareCorners, "Square corners")
 	add(menu, checked(startsWithWindows()), menuStartup, "Start with Windows")
+	add(menu, checked(m.cfg.RunAsAdministrator), menuAdmin, "Run as administrator")
 	add(menu, mfPopup, appsMenu, "Keep title bar for") // the menu owns and destroys appsMenu
 	add(menu, mfSeparator, 0, "")
 	add(menu, mfString, menuSettings, "Open settings file")
@@ -146,9 +148,9 @@ func (m *manager) showMenu() {
 	case cmd == menuSquareCorners:
 		m.setSquareCorners(!m.cfg.SquareCorners)
 	case cmd == menuStartup:
-		if err := setStartWithWindows(!startsWithWindows()); err != nil {
-			m.notify("Couldn't change Start with Windows: " + err.Error())
-		}
+		m.toggleStartWithWindows()
+	case cmd == menuAdmin:
+		m.setRunAsAdministrator(!m.cfg.RunAsAdministrator)
 	case cmd == menuSettings:
 		openFile(configPath)
 	case cmd == menuLog:

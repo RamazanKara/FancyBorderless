@@ -18,6 +18,9 @@ type config struct {
 	SquareCorners        bool     `json:"squareCorners"`
 	KeepTitleBarApps     []string `json:"keepTitleBarApps"`
 	ToggleTitleBarHotkey string   `json:"toggleTitleBarHotkey"`
+	// RunAsAdministrator is needed for games that run as administrator: Windows doesn't let
+	// a normal program move or restyle their windows.
+	RunAsAdministrator bool `json:"runAsAdministrator"`
 }
 
 func defaultConfig() config {

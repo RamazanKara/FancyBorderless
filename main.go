@@ -13,12 +13,14 @@ import (
 	"runtime"
 	"slices"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
 const (
-	version     = "1.1.1"
+	version     = "1.2.0"
 	windowClass = "FancyBorderless"
+	restartFlag = "--restart"
 )
 
 var (
@@ -32,22 +34,29 @@ func main() {
 	runtime.LockOSThread()
 	procSetProcessDpiAwarenessContext.Call(dpiAwarenessPerMonitorV2)
 
-	if len(os.Args) > 1 {
+	restart := len(os.Args) > 1 && os.Args[1] == restartFlag
+	if len(os.Args) > 1 && !restart {
 		attachConsole()
 		os.Exit(runCommand(os.Args[1]))
 	}
-	if err := run(); err != nil {
+	if err := run(restart); err != nil {
 		log.Print(err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(restart bool) error {
 	if err := os.MkdirAll(appDir, 0o755); err != nil {
 		return err
 	}
-	_, _, err := procCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(utf16Ptr(`Local\FancyBorderless`))))
-	if err == syscall.Errno(errorAlreadyExists) {
+	if cfg, _ := loadConfig(); cfg.RunAsAdministrator && !isElevated() && !restart {
+		// Hand over to an instance with administrator rights. If the Windows prompt is
+		// declined, carry on without them.
+		if relaunchElevated(false) == nil {
+			return nil
+		}
+	}
+	if !claimInstance(restart) {
 		return nil
 	}
 	logFile, err := openLog()
@@ -75,6 +84,27 @@ func run() error {
 	}
 	log.Print("exited")
 	return nil
+}
+
+// claimInstance makes sure only one FancyBorderless runs. After a restart the previous
+// instance may still be shutting down, so it waits for that one to finish.
+func claimInstance(wait bool) bool {
+	name := utf16Ptr(`Local\FancyBorderless`)
+	for attempt := 0; ; attempt++ {
+		h, _, err := procCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(name)))
+		// An instance running as administrator owns a lock this one may not even open.
+		running := err == syscall.Errno(errorAlreadyExists) || err == syscall.ERROR_ACCESS_DENIED
+		if !running {
+			return true
+		}
+		if h != 0 {
+			syscall.CloseHandle(syscall.Handle(h))
+		}
+		if !wait || attempt == 50 {
+			return false
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 func openLog() (*os.File, error) {
@@ -106,12 +136,21 @@ func (m *manager) createWindow() error {
 func (m *manager) start() {
 	m.icon, _, _ = procLoadIconW.Call(0, idiApplication)
 	taskbarCreated, _, _ = procRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(utf16Ptr("TaskbarCreated"))))
+	// Running as administrator, Windows would drop these messages from Explorer and from a
+	// normal "--quit" unless they're explicitly allowed.
+	for _, msg := range []uintptr{wmTrayIcon, taskbarCreated, wmClose} {
+		procChangeWindowMessageFilterEx.Call(m.hwnd, msg, msgfltAllow, 0)
+	}
 	m.reloadConfig()
 	m.addTrayIcon()
 	m.hook()
 	procSetTimer.Call(m.hwnd, timerTick, 100, 0)
 	procSetTimer.Call(m.hwnd, timerScan, 1000, 0)
-	log.Printf("FancyBorderless %s started", version)
+	log.Printf("FancyBorderless %s started (administrator: %v)", version, isElevated())
+	if m.cfg.RunAsAdministrator && !isElevated() {
+		m.notify("Running without administrator rights, so games that run as administrator can't be changed.")
+	}
+	m.syncStartup()
 	m.scan()
 }
 

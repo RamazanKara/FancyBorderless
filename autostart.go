@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"syscall"
@@ -13,14 +14,36 @@ var (
 	procRegDeleteValueW = advapi32.NewProc("RegDeleteValueW")
 )
 
-// Start with Windows uses the current user's Run key, the same place Task Manager's Startup
-// apps page reads from.
+// Without administrator mode, Start with Windows uses the current user's Run key, the list
+// Task Manager's Startup apps page shows. In administrator mode it uses a logon task.
 const (
 	runKeyPath   = `Software\Microsoft\Windows\CurrentVersion\Run`
 	runValueName = "FancyBorderless"
 )
 
 func startsWithWindows() bool {
+	return runKeyEnabled() || logonTaskExists()
+}
+
+// setStartWithWindows uses the logon task when admin is true and the Run key otherwise,
+// and removes the other one.
+func setStartWithWindows(on, admin bool) error {
+	if !on {
+		return errors.Join(setRunKey(false), deleteLogonTask())
+	}
+	if admin {
+		if err := createLogonTask(); err != nil {
+			return err
+		}
+		return setRunKey(false)
+	}
+	if err := setRunKey(true); err != nil {
+		return err
+	}
+	return deleteLogonTask()
+}
+
+func runKeyEnabled() bool {
 	exe, err := os.Executable()
 	if err != nil {
 		return false
@@ -38,7 +61,7 @@ func startsWithWindows() bool {
 	return strings.EqualFold(strings.Trim(syscall.UTF16ToString(buf), `"`), exe)
 }
 
-func setStartWithWindows(on bool) error {
+func setRunKey(on bool) error {
 	var key syscall.Handle
 	if err := syscall.RegOpenKeyEx(syscall.HKEY_CURRENT_USER, utf16Ptr(runKeyPath), 0, syscall.KEY_SET_VALUE, &key); err != nil {
 		return err

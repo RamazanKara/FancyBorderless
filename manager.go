@@ -554,7 +554,67 @@ func (m *manager) restoreAll(why string) {
 
 func (m *manager) markBroken(h uintptr, w *window, action string, err error) {
 	w.broken = true
-	log.Printf("%s: Windows refused %s (%v). If it runs as administrator, FancyBorderless has to as well.", m.describe(h, w), action, err)
+	log.Printf("%s: Windows refused %s (%v)", m.describe(h, w), action, err)
+	if !isElevated() && processElevated(windowPID(h)) {
+		m.notifyElevated(w.exe)
+	}
+}
+
+// notifyElevated explains, once per app, why a window that runs as administrator can't be
+// changed and what to turn on.
+func (m *manager) notifyElevated(exe string) {
+	key := "elevated:" + exe
+	if m.reported[key] {
+		return
+	}
+	m.reported[key] = true
+	m.notify(elevatedHint(exe))
+}
+
+func elevatedHint(exe string) string {
+	return displayName(filepath.Base(exe)) + " runs as administrator. Turn on \"Run as administrator\" in this tray menu, and \"Always run as administrator\" in PowerToys (General) so FancyZones can snap it."
+}
+
+func (m *manager) setRunAsAdministrator(on bool) {
+	m.cfg.RunAsAdministrator = on
+	m.saveConfig()
+	if on && !isElevated() {
+		if err := relaunchElevated(true); err != nil {
+			m.cfg.RunAsAdministrator = false
+			m.saveConfig()
+			m.notify(err.Error())
+			return
+		}
+		// The new instance waits for this one to exit.
+		procPostMessageW.Call(m.hwnd, wmClose, 0, 0)
+		return
+	}
+	m.syncStartup()
+	if !on && isElevated() {
+		m.notify("FancyBorderless keeps administrator rights until it's restarted.")
+	}
+}
+
+// syncStartup moves "Start with Windows" between the Run key and the logon task when the
+// administrator setting changed. Creating or removing the task needs administrator rights.
+func (m *manager) syncStartup() {
+	if !startsWithWindows() || !isElevated() {
+		return
+	}
+	admin := m.cfg.RunAsAdministrator
+	if logonTaskExists() == admin && runKeyEnabled() != admin {
+		return
+	}
+	if err := setStartWithWindows(true, admin); err != nil {
+		log.Printf("Start with Windows: %v", err)
+	}
+}
+
+func (m *manager) toggleStartWithWindows() {
+	admin := m.cfg.RunAsAdministrator && isElevated()
+	if err := setStartWithWindows(!startsWithWindows(), admin); err != nil {
+		m.notify("Couldn't change Start with Windows: " + err.Error())
+	}
 }
 
 func (m *manager) setEnabled(on bool) {
@@ -631,6 +691,10 @@ func (m *manager) toggleTitleBar() {
 		m.notify("FancyBorderless is turned off. Turn on \"Remove title bars\" in its tray menu.")
 		return
 	}
+	if !isElevated() && processElevated(windowPID(h)) {
+		m.notify(elevatedHint(processPath(windowPID(h))))
+		return
+	}
 	w := m.windows[h]
 	if w == nil {
 		w = m.track(h)
@@ -669,7 +733,7 @@ func (m *manager) toggleTitleBar() {
 	case w.offset && titleBarAboveScreen(h):
 		m.notify(name + ": title bar hidden above the screen.")
 	case w.broken:
-		m.notify("Windows refused to change " + name + ". If it runs as administrator, FancyBorderless has to as well.")
+		m.notify("Windows refused to change " + name + ". The log has details.")
 	case w.ownBar > 0 && bits == 0:
 		m.notify("Snap " + name + " into a zone along the top of the screen to hide its title bar.")
 	case w.offset:
