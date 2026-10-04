@@ -45,16 +45,19 @@ type window struct {
 	fixedSize   bool
 	origStyle   uint32
 	origExStyle uint32
-	stripped    bool // title bar and border removed by us
-	strippedAt  time.Time
-	refusals    int    // times the program put its frame back right away
-	offset      bool   // title bar kept but hidden (enforced frame, popup, or the app's own bar)
-	hidden      bool   // title bar clipped off by us: window region set, frame and backdrop off
-	backdrop    uint32 // the backdrop it had before
-	manual      bool   // title bar removed with the hotkey on a window that isn't snapped
-	broken      bool   // Windows refused a change, usually because the window runs elevated
-	gaveUp      bool
-	changes     []time.Time
+	// origRect and origVisible: the window and its visible part before its frame came off,
+	// so a game gets exactly that window back with its frame.
+	origRect, origVisible rect
+	stripped              bool // title bar and border removed by us
+	strippedAt            time.Time
+	refusals              int    // times the program put its frame back right away
+	offset                bool   // title bar kept but hidden (enforced frame, popup, or the app's own bar)
+	hidden                bool   // title bar clipped off by us: window region set, frame and backdrop off
+	backdrop              uint32 // the backdrop it had before
+	manual                bool   // title bar removed with the hotkey on a window that isn't snapped
+	broken                bool   // Windows refused a change, usually because the window runs elevated
+	gaveUp                bool
+	changes               []time.Time
 }
 
 type manager struct {
@@ -620,6 +623,7 @@ func (m *manager) strip(h uintptr, w *window, target rect) {
 	style, ex := windowStyle(h), windowExStyle(h)
 	if !w.stripped {
 		w.origStyle, w.origExStyle = style, ex
+		w.origRect, w.origVisible = windowRect(h), visibleRect(h)
 	}
 	if err := setStyles(h, style&^frameStyles, ex&^frameExStyles); err != nil {
 		m.markBroken(h, w, "removing the title bar", err)
@@ -694,7 +698,7 @@ func (m *manager) showTitleBar(h uintptr, w *window, why string) {
 }
 
 func (m *manager) restore(h uintptr, w *window, why string) {
-	visible := windowRect(h)
+	now := windowRect(h)
 	style := windowStyle(h) | w.origStyle&frameStyles
 	ex := windowExStyle(h) | w.origExStyle&frameExStyles
 	if err := setStyles(h, style, ex); err != nil {
@@ -703,10 +707,17 @@ func (m *manager) restore(h uintptr, w *window, why string) {
 	}
 	w.stripped, w.manual = false, false
 	removeProp(h, propSavedStyle)
-	// The window keeps its outer size. Growing a game's window by the frame instead would
-	// keep its picture whole, but some games remember that size and keep it once the frame
-	// is gone again, spilling over into the next zone.
-	if err := setVisibleRect(h, visible); err != nil {
+	var err error
+	if o, v := w.origRect, w.origVisible; w.fixedSize && o != (rect{}) {
+		// A game draws at a size of its own, so it gets exactly the window it had before, with
+		// its visible corner where the window is now. That's one move: some games take any
+		// size they see along the way as their new picture size.
+		left, top := now.Left-(v.Left-o.Left), now.Top-(v.Top-o.Top)
+		err = setWindowPos(h, rect{left, top, left + o.width(), top + o.height()}, swpQuiet|swpFrameChanged)
+	} else {
+		err = setVisibleRect(h, now)
+	}
+	if err != nil {
 		log.Printf("%s: moving after restoring the title bar: %v", m.describe(h, w), err)
 	}
 	log.Printf("%s: title bar restored (%s)", m.describe(h, w), why)
@@ -877,7 +888,9 @@ func (m *manager) toggleTitleBar() {
 	switch {
 	case bits != 0:
 		m.handleSnapped(h, w, bits)
-	case w.titleBar:
+	case w.titleBar && !w.offset:
+		// Outside a zone only a frame that comes off can go. A window that keeps its frame
+		// isn't tried again: some games take every attempt as a new window size.
 		m.strip(h, w, visibleRect(h))
 		w.manual = w.stripped
 	}
