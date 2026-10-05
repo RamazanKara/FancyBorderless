@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	version     = "1.4.2"
+	version     = "1.4.3"
 	windowClass = "FancyBorderless"
 	restartFlag = "--restart"
 )
@@ -317,6 +317,7 @@ func list() int {
 		if bits == 0 || !isWindowVisible(h) {
 			continue
 		}
+		h = frameWindow(h)
 		exe := processPath(windowPID(h))
 		style := windowStyle(h)
 		titleBar := "drawn by Windows"
