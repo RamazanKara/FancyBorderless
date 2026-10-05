@@ -124,8 +124,8 @@ const (
 	dwmwaExtendedFrameBounds = 9
 	dwmwaCloaked             = 14
 	dwmwaSystemBackdropType  = 38
-	dwmncrpUseWindowStyle    = 0
 	dwmncrpDisabled          = 1
+	dwmncrpEnabled           = 2
 	dwmsbtNone               = 1
 
 	processQueryLimitedInformation = 0x1000
@@ -149,6 +149,7 @@ const (
 	wmHotkey        = 0x0312
 	wmLButtonUp     = 0x0202
 	wmRButtonUp     = 0x0205
+	wmThemeChanged  = 0x031A
 	wmApp           = 0x8000
 	spiSetWorkArea  = 0x002F
 
@@ -340,9 +341,17 @@ func hasRegion(h uintptr) bool { _, ok := regionBox(h); return ok }
 func setFrameDrawing(h uintptr, on bool) {
 	policy := uint32(dwmncrpDisabled)
 	if on {
-		policy = dwmncrpUseWindowStyle
+		// USEWINDOWSTYLE can leave custom frames disabled, exposing their thick resize
+		// borders. Restore rendering explicitly when it was enabled before clipping.
+		policy = dwmncrpEnabled
 	}
 	procDwmSetWindowAttribute.Call(h, dwmwaNCRenderingPolicy, uintptr(unsafe.Pointer(&policy)), unsafe.Sizeof(policy))
+	if on && !frameDrawn(h) {
+		// Some apps cache the unthemed frame while clipped. Changing the DWM policy alone
+		// leaves their resize border exposed until the app refreshes its theme.
+		var result uintptr
+		procSendMessageTimeoutW.Call(h, wmThemeChanged, 0, 0, smtoAbortIfHung, 100, uintptr(unsafe.Pointer(&result)))
+	}
 }
 
 func frameDrawn(h uintptr) bool {
@@ -571,8 +580,10 @@ func zoneBits(h uintptr) uint64 {
 // Our own marks on the windows we change. Window properties live with the window, so a new
 // FancyBorderless instance can still undo the changes after the old one was killed.
 var (
-	propSavedStyle = utf16Ptr("FancyBorderless_style")      // original style << 32 | ex-style
-	propHidden     = utf16Ptr("FancyBorderless_hidden")     // title bar kept but clipped off
+	propSavedStyle = utf16Ptr("FancyBorderless_style") // original style << 32 | ex-style
+	// Hidden state: bit 0 marks clipping, bit 1 an originally undrawn frame, the rest the
+	// original backdrop. The old value 1 restores a drawn frame and the default backdrop.
+	propHidden     = utf16Ptr("FancyBorderless_hidden")
 	propKeepsFrame = utf16Ptr("FancyBorderless_keepsframe") // the program won't do without its frame
 )
 
