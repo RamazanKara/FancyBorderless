@@ -54,6 +54,7 @@ type window struct {
 	offset                bool   // title bar kept but hidden (enforced frame, popup, or the app's own bar)
 	hidden                bool   // title bar clipped off by us: window region set, frame and backdrop off
 	backdrop              uint32 // the backdrop it had before
+	frameWasDrawn         bool   // whether Windows drew its frame before clipping
 	manual                bool   // title bar removed with the hotkey on a window that isn't snapped
 	broken                bool   // Windows refused a change, usually because the window runs elevated
 	gaveUp                bool
@@ -338,7 +339,11 @@ func (m *manager) track(h uintptr) *window {
 	}
 	w.titleBar = drawsTitleBar(h)
 	w.fixedSize = windowStyle(h)&wsThickFrame == 0
-	w.hidden = getProp(h, propHidden) != 0 // by an earlier FancyBorderless
+	if saved := getProp(h, propHidden); saved != 0 {
+		w.hidden = true // by an earlier FancyBorderless
+		w.frameWasDrawn = saved&2 == 0
+		w.backdrop = uint32(saved >> 2)
+	}
 	w.offset = w.hidden || getProp(h, propKeepsFrame) != 0 || m.framedApps[w.exe]
 	if !w.titleBar {
 		m.measureOwnBar(h, w)
@@ -468,6 +473,7 @@ func (m *manager) placeClient(h uintptr, w *window, zone rect) {
 			return
 		}
 		w.backdrop = backdrop(h)
+		w.frameWasDrawn = frameDrawn(h)
 	}
 	clip := func() bool {
 		if err := clipTo(h, contentRect(h, w)); err != nil {
@@ -515,7 +521,11 @@ func (m *manager) placeClient(h uintptr, w *window, zone rect) {
 	}
 	if !w.hidden {
 		w.hidden = true
-		setProp(h, propHidden, 1)
+		saved := uintptr(w.backdrop)<<2 | 1
+		if !w.frameWasDrawn {
+			saved |= 2
+		}
+		setProp(h, propHidden, saved)
 	}
 }
 
@@ -523,7 +533,7 @@ func (m *manager) placeClient(h uintptr, w *window, zone rect) {
 func (m *manager) unhide(h uintptr, w *window) {
 	unclipWindow(h)
 	setBackdrop(h, w.backdrop)
-	setFrameDrawing(h, true)
+	setFrameDrawing(h, w.frameWasDrawn)
 	w.hidden = false
 	removeProp(h, propHidden)
 }
