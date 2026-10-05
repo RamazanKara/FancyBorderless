@@ -35,6 +35,7 @@ var (
 	procGetMonitorInfoW               = user32.NewProc("GetMonitorInfoW")
 	procGetPropW                      = user32.NewProc("GetPropW")
 	procGetSystemMetrics              = user32.NewProc("GetSystemMetrics")
+	procGetWindow                     = user32.NewProc("GetWindow")
 	procGetWindowLongPtrW             = user32.NewProc("GetWindowLongPtrW")
 	procGetWindowRect                 = user32.NewProc("GetWindowRect")
 	procGetWindowRgnBox               = user32.NewProc("GetWindowRgnBox")
@@ -113,6 +114,7 @@ const (
 
 	swShowNormal = 1
 	gaRoot       = 2
+	gwOwner      = 4
 
 	monitorDefaultToNearest   = 2
 	monitorInfoPrimary        = 1
@@ -223,6 +225,15 @@ func unionRect(a, b rect) rect {
 	return rect{min(a.Left, b.Left), min(a.Top, b.Top), max(a.Right, b.Right), max(a.Bottom, b.Bottom)}
 }
 
+func nearRect(a, b rect, tolerance int32) bool {
+	for _, delta := range [...]int32{a.Left - b.Left, a.Top - b.Top, a.Right - b.Right, a.Bottom - b.Bottom} {
+		if delta < -tolerance || delta > tolerance {
+			return false
+		}
+	}
+	return true
+}
+
 type point struct{ X, Y int32 }
 
 type winMsg struct {
@@ -299,6 +310,33 @@ func isIconic(h uintptr) bool        { r, _, _ := procIsIconic.Call(h); return r
 func isZoomed(h uintptr) bool        { r, _, _ := procIsZoomed.Call(h); return r != 0 }
 func rootWindow(h uintptr) uintptr   { r, _, _ := procGetAncestor.Call(h, gaRoot); return r }
 func foregroundWindow() uintptr      { r, _, _ := procGetForegroundWindow.Call(); return r }
+
+// frameWindow finds the frame around a separate, owned content surface. Some
+// players put focus and FancyZones' marker on their video window, although its
+// title bar belongs to the owner. Ordinary dialogs and floating windows stay
+// independent: only an unframed surface filling the owner's client area qualifies.
+func frameWindow(h uintptr) uintptr {
+	h = rootWindow(h)
+	if h == 0 || windowStyle(h)&frameStyles != 0 || windowExStyle(h)&(wsExToolWindow|wsExDlgModalFrame) != 0 ||
+		getProp(h, propSavedStyle) != 0 || getProp(h, propHidden) != 0 {
+		return h
+	}
+	owner, _, _ := procGetWindow.Call(h, gwOwner)
+	if owner == 0 || windowPID(owner) != windowPID(h) || windowExStyle(owner)&wsExToolWindow != 0 {
+		return h
+	}
+	if windowStyle(owner)&frameStyles == 0 && getProp(owner, propSavedStyle) == 0 && getProp(owner, propHidden) == 0 {
+		return h
+	}
+	content, client := windowRect(h), clientScreenRect(owner)
+	tolerance := scaleForWindow(owner, 8)
+	near := func(a, b int32) bool { return a-b >= -tolerance && a-b <= tolerance }
+	if !near(content.Left, client.Left) || !near(content.Right, client.Right) || !near(content.Bottom, client.Bottom) ||
+		content.Top < client.Top-tolerance || content.Top > client.Top+scaleForWindow(owner, 80) {
+		return h
+	}
+	return owner
+}
 
 // isHung reports a window that hasn't answered Windows for a few seconds. Changing its style
 // or position would wait for it, and FancyBorderless with it.

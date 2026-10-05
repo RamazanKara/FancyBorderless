@@ -32,6 +32,8 @@ type window struct {
 	pid  uint32
 	exe  string
 	bits uint64 // zone marker when last evaluated
+	// zoneSource is an owned content window carrying the frame's FancyZones marker.
+	zoneSource uintptr
 	// titleBar: Windows draws a title bar above the window's content.
 	titleBar bool
 	// ownBar: height of a title bar the app draws itself, plain (WPF and UWP apps, for
@@ -141,7 +143,10 @@ func (m *manager) onEvent(event uint32, h uintptr) {
 	case eventObjectLocationChange:
 		// Moves of windows we manage, and of other windows of the same app once FancyZones
 		// snaps them (it doesn't always write its files for those).
-		if _, ok := m.windows[h]; !ok && zoneBits(h) == 0 {
+		if rootWindow(h) != h {
+			return
+		}
+		if _, ok := m.windows[frameWindow(h)]; !ok && zoneBits(h) == 0 {
 			return
 		}
 	}
@@ -185,7 +190,11 @@ func (m *manager) onFancyZonesChanged() {
 // are kept up to date by their move hooks.
 func (m *manager) findNewlySnapped() {
 	for _, h := range topLevelWindows() {
-		if _, ok := m.windows[h]; !ok && isWindowVisible(h) && zoneBits(h) != 0 {
+		if !isWindowVisible(h) || zoneBits(h) == 0 {
+			continue
+		}
+		target := frameWindow(h)
+		if w := m.windows[target]; w == nil || target != h && w.zoneSource != h {
 			m.evaluate(h)
 		}
 	}
@@ -208,7 +217,7 @@ func (m *manager) scan() {
 		}
 		pids[w.pid] = true
 		// Some apps take the region off when they redraw their frame; it's put back here.
-		if zoneBits(h) != w.bits || w.hidden && !hasRegion(h) {
+		if m.zoneBits(h) != w.bits || w.hidden && !hasRegion(h) {
 			m.schedule(h, 0)
 		}
 	}
@@ -288,6 +297,8 @@ func (m *manager) refitAll() {
 }
 
 func (m *manager) evaluate(h uintptr) {
+	source := h
+	h = frameWindow(h)
 	if !isWindow(h) {
 		delete(m.windows, h)
 		return
@@ -296,7 +307,13 @@ func (m *manager) evaluate(h uintptr) {
 		return
 	}
 	w := m.windows[h]
-	bits := zoneBits(h)
+	if w == nil && source != h {
+		w = m.track(h)
+	}
+	if w != nil && source != h {
+		w.zoneSource = source
+	}
+	bits := m.zoneBits(h)
 	if w != nil {
 		w.bits = bits
 	}
@@ -313,6 +330,31 @@ func (m *manager) evaluate(h uintptr) {
 	if !w.broken {
 		m.handleSnapped(h, w, bits)
 	}
+}
+
+// zoneBits follows the content window's marker without copying it to the frame.
+// A video surface can retain an old marker after its frame is dragged elsewhere.
+// Only inherit it while the frame actually fits that zone; never move a frame to
+// an old location just because its video still remembers it.
+func (m *manager) zoneBits(h uintptr) uint64 {
+	if bits := zoneBits(h); bits != 0 {
+		return bits
+	}
+	if w := m.windows[h]; w != nil && w.zoneSource != 0 && frameWindow(w.zoneSource) == h {
+		bits := zoneBits(w.zoneSource)
+		if bits == 0 {
+			return 0
+		}
+		zone, ok := m.zoneRect(h, bits)
+		bounds := visibleRect(h)
+		if w.hidden {
+			bounds = contentRect(h, w)
+		}
+		if ok && nearRect(bounds, zone, scaleForWindow(h, 8)) {
+			return bits
+		}
+	}
+	return 0
 }
 
 func (m *manager) isCandidate(h uintptr) bool {
@@ -687,7 +729,7 @@ func (m *manager) showTitleBar(h uintptr, w *window, why string) {
 	// The window moves back first, while it's still clipped, so the title bar doesn't show
 	// outside its zone on the way. A snapped window moves down by its title bar; anything
 	// else only if its title bar is above the screen.
-	bits := zoneBits(h)
+	bits := m.zoneBits(h)
 	if bits != 0 {
 		r := windowRect(h)
 		bar := contentRect(h, w).Top - r.Top
@@ -859,7 +901,7 @@ func (m *manager) registerHotkeys() {
 // toggleTitleBar hides or shows the title bar of the window in front. The choice is
 // remembered for the app, so its other windows and later ones follow it.
 func (m *manager) toggleTitleBar() {
-	h := rootWindow(foregroundWindow())
+	h := frameWindow(foregroundWindow())
 	if h == 0 || !m.isCandidate(h) {
 		return
 	}
@@ -874,6 +916,15 @@ func (m *manager) toggleTitleBar() {
 	w := m.windows[h]
 	if w == nil {
 		w = m.track(h)
+	}
+	// The hotkey can arrive before the first scan, with the frame itself focused.
+	if m.zoneBits(h) == 0 {
+		for _, source := range topLevelWindows() {
+			if source != h && zoneBits(source) != 0 && frameWindow(source) == h {
+				w.zoneSource = source
+				break
+			}
+		}
 	}
 	if w.exe == "" {
 		beep()
@@ -894,7 +945,7 @@ func (m *manager) toggleTitleBar() {
 		return
 	}
 	m.setKeep(exeName, false)
-	bits := zoneBits(h)
+	bits := m.zoneBits(h)
 	switch {
 	case bits != 0:
 		m.handleSnapped(h, w, bits)
