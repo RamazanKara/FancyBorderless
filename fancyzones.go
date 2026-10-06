@@ -102,6 +102,7 @@ type monitor struct {
 	instance string // 4&12ab34cd&0&UID256
 	bounds   rect
 	work     rect
+	dpi      uint32
 	primary  bool
 }
 
@@ -116,6 +117,7 @@ func identifyMonitor(hmon uintptr) (monitor, bool) {
 		device:  syscall.UTF16ToString(mi.Device[:]),
 		bounds:  mi.Monitor,
 		work:    mi.Work,
+		dpi:     monitorDPI(hmon),
 		primary: mi.Flags&monitorInfoPrimary != 0,
 	}
 	for i := uintptr(0); ; i++ {
@@ -174,7 +176,7 @@ func (f *fancyZones) layoutFor(m monitor, desktop string) zoneLayout {
 	case "canvas":
 		var c fzCanvas
 		if err = json.Unmarshal(custom.Info, &c); err == nil {
-			zones, err = canvasZones(m.work, c)
+			zones, err = canvasZones(m.work, c, m.dpi)
 		}
 	default:
 		err = fmt.Errorf("unknown layout type %q", custom.Type)
@@ -283,18 +285,20 @@ func gridZones(work rect, g fzGrid, spacing int64) (map[int]rect, error) {
 	return zones, nil
 }
 
-// canvasZones scales the editor's zone rectangles from the work area they were drawn on to
-// the current one, like LayoutConfigurator::Custom (the DPI conversions there cancel out).
-func canvasZones(work rect, c fzCanvas) (map[int]rect, error) {
+// Keep LayoutConfigurator::Custom's float32 operation order: cancelling its DPI
+// conversions algebraically changes some truncated edges by a pixel.
+func canvasZones(work rect, c fzCanvas, dpi uint32) (map[int]rect, error) {
 	if c.RefWidth <= 0 || c.RefHeight <= 0 {
 		return nil, errors.New("malformed canvas")
 	}
-	sx := float32(work.width()) / float32(c.RefWidth)
-	sy := float32(work.height()) / float32(c.RefHeight)
+	width := float32(work.width()) * 96 / float32(dpi)
+	height := float32(work.height()) * 96 / float32(dpi)
 	zones := map[int]rect{}
 	for i, z := range c.Zones {
-		x, y := float32(z.X)*sx, float32(z.Y)*sy
-		w, h := float32(z.Width)*sx, float32(z.Height)*sy
+		x := (float32(z.X) * width / float32(c.RefWidth)) * float32(dpi) / 96
+		y := (float32(z.Y) * height / float32(c.RefHeight)) * float32(dpi) / 96
+		w := (float32(z.Width) * width / float32(c.RefWidth)) * float32(dpi) / 96
+		h := (float32(z.Height) * height / float32(c.RefHeight)) * float32(dpi) / 96
 		zones[i] = rect{
 			Left:   work.Left + int32(x),
 			Top:    work.Top + int32(y),

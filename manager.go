@@ -29,9 +29,12 @@ const (
 )
 
 type window struct {
-	pid  uint32
-	exe  string
-	bits uint64 // zone marker when last evaluated
+	pid    uint32
+	exe    string
+	bits   uint64 // zone marker when last evaluated
+	dpi    uint32
+	placed rect // last bounds we set, to distinguish app moves from our own
+	refit  bool // an existing snap must follow a display or layout change
 	// zoneSource is an owned content window carrying the frame's FancyZones marker.
 	zoneSource uintptr
 	// titleBar: Windows draws a title bar above the window's content.
@@ -64,17 +67,18 @@ type window struct {
 }
 
 type manager struct {
-	hwnd     uintptr
-	icon     uintptr
-	ownPID   uint32
-	cfg      config
-	cfgStamp string
-	fz       *fancyZones
-	fzStamp  string
-	desktop  string
-	layouts  map[uintptr]zoneLayout // per monitor handle
-	windows  map[uintptr]*window
-	reported map[string]bool
+	hwnd         uintptr
+	icon         uintptr
+	ownPID       uint32
+	cfg          config
+	cfgStamp     string
+	fz           *fancyZones
+	fzStamp      string
+	displayStamp string
+	desktop      string
+	layouts      map[uintptr]zoneLayout // per monitor handle
+	windows      map[uintptr]*window
+	reported     map[string]bool
 	// framedApps won't do without their frame (see rememberFrame), by exe path.
 	framedApps map[string]bool
 	hooks      []uintptr
@@ -113,10 +117,9 @@ func setWinEventHook(event uint32, pid uint32) uintptr {
 	return h
 }
 
-// hook listens system-wide only for events that are rare: a window appearing and the end of
-// a mouse drag.
+// hook listens system-wide only for window lifetimes and the end of a mouse drag.
 func (m *manager) hook() {
-	for _, event := range []uint32{eventObjectShow, eventSystemMoveSizeEnd} {
+	for _, event := range []uint32{eventObjectShow, eventObjectDestroy, eventSystemMoveSizeEnd} {
 		if h := setWinEventHook(event, 0); h != 0 {
 			m.hooks = append(m.hooks, h)
 		}
@@ -134,6 +137,16 @@ func (m *manager) watchMoves(pid uint32) {
 
 func (m *manager) onEvent(event uint32, h uintptr) {
 	switch event {
+	case eventObjectDestroy:
+		delete(m.windows, h)
+		procKillTimer.Call(m.hwnd, h)
+		for frame, w := range m.windows {
+			if w.zoneSource == h {
+				w.zoneSource = 0
+				m.schedule(frame, settleDelay)
+			}
+		}
+		return
 	case eventObjectShow:
 		// Tooltips, menus and the controls inside windows show all the time; only windows
 		// FancyZones could snap matter.
@@ -203,21 +216,22 @@ func (m *manager) findNewlySnapped() {
 // scan is the safety net for anything no event reports, such as a virtual desktop switch.
 func (m *manager) scan() {
 	m.reloadIfChanged()
-	if d := currentDesktop(); d != m.desktop {
-		m.desktop = d
+	d, displays := currentDesktop(), monitorStamp()
+	if d != m.desktop || displays != m.displayStamp {
+		m.desktop, m.displayStamp = d, displays
 		m.layouts = map[uintptr]zoneLayout{}
 		m.refitAll()
 	}
 	m.findNewlySnapped()
 	pids := map[uint32]bool{}
 	for h, w := range m.windows {
-		if !isWindow(h) {
+		if !isWindow(h) || windowPID(h) != w.pid {
 			delete(m.windows, h)
 			continue
 		}
 		pids[w.pid] = true
 		// Some apps take the region off when they redraw their frame; it's put back here.
-		if m.zoneBits(h) != w.bits || w.hidden && !hasRegion(h) {
+		if m.zoneBits(h) != w.bits || w.hidden && !hasRegion(h) || monitorDPI(monitorFromWindow(h)) != w.dpi {
 			m.schedule(h, 0)
 		}
 	}
@@ -292,16 +306,24 @@ func (m *manager) saveConfig() {
 func (m *manager) refitAll() {
 	for h, w := range m.windows {
 		w.changes, w.gaveUp = nil, false
+		w.refit = w.bits != 0
 		m.schedule(h, 0)
 	}
 }
 
 func (m *manager) evaluate(h uintptr) {
+	if !isWindow(h) {
+		delete(m.windows, h)
+		return
+	}
 	source := h
 	h = frameWindow(h)
 	if !isWindow(h) {
 		delete(m.windows, h)
 		return
+	}
+	if w := m.windows[h]; w != nil && windowPID(h) != w.pid {
+		delete(m.windows, h)
 	}
 	if !m.cfg.RemoveTitleBars || !m.isCandidate(h) {
 		return
@@ -312,6 +334,13 @@ func (m *manager) evaluate(h uintptr) {
 	}
 	if w != nil && source != h {
 		w.zoneSource = source
+	}
+	if w != nil {
+		if m.leaveFullscreen(h, w) {
+			return
+		}
+		m.updateDPI(h, w)
+		defer func() { w.refit = false }()
 	}
 	bits := m.zoneBits(h)
 	if w != nil {
@@ -338,23 +367,42 @@ func (m *manager) evaluate(h uintptr) {
 // an old location just because its video still remembers it.
 func (m *manager) zoneBits(h uintptr) uint64 {
 	if bits := zoneBits(h); bits != 0 {
-		return bits
+		w := m.windows[h]
+		if w != nil && (w.refit && w.bits != 0 || w.placed != (rect{}) && nearRect(windowRect(h), w.placed, scaleForWindow(h, 8))) {
+			return bits
+		}
+		if zone, ok := m.zoneRect(h, bits); ok {
+			if atZone(visibleRect(h), zone, scaleForWindow(h, 8)) || w != nil && w.hidden && atZone(contentRect(h, w), zone, scaleForWindow(h, 8)) {
+				return bits
+			}
+		}
+		return 0
 	}
 	if w := m.windows[h]; w != nil && w.zoneSource != 0 && frameWindow(w.zoneSource) == h {
 		bits := zoneBits(w.zoneSource)
 		if bits == 0 {
 			return 0
 		}
+		if w.refit && w.bits != 0 || w.placed != (rect{}) && nearRect(windowRect(h), w.placed, scaleForWindow(h, 8)) {
+			return bits
+		}
 		zone, ok := m.zoneRect(h, bits)
 		bounds := visibleRect(h)
 		if w.hidden {
 			bounds = contentRect(h, w)
 		}
-		if ok && nearRect(bounds, zone, scaleForWindow(h, 8)) {
+		if ok && atZone(bounds, zone, scaleForWindow(h, 8)) {
 			return bits
 		}
 	}
 	return 0
+}
+
+// FancyZones only moves fixed-size and stripped windows, so their size need not
+// match the zone. Its corner must still match before a marker can cause a snap.
+func atZone(bounds, zone rect, tolerance int32) bool {
+	return nearRect(rect{bounds.Left, bounds.Top, bounds.Left, bounds.Top},
+		rect{zone.Left, zone.Top, zone.Left, zone.Top}, tolerance)
 }
 
 func (m *manager) isCandidate(h uintptr) bool {
@@ -371,7 +419,7 @@ func (m *manager) isCandidate(h uintptr) bool {
 // picks up where an earlier FancyBorderless instance left off.
 func (m *manager) track(h uintptr) *window {
 	pid := windowPID(h)
-	w := &window{pid: pid, exe: processPath(pid)}
+	w := &window{pid: pid, exe: processPath(pid), dpi: monitorDPI(monitorFromWindow(h))}
 	m.windows[h] = w
 	if saved := getProp(h, propSavedStyle); saved != 0 {
 		w.stripped, w.origStyle, w.origExStyle = true, uint32(saved>>32), uint32(saved)
@@ -428,6 +476,11 @@ func (m *manager) wantsBorderless(w *window) bool {
 }
 
 func (m *manager) handleSnapped(h uintptr, w *window, bits uint64) {
+	if w.broken || m.leaveFullscreen(h, w) {
+		return
+	}
+	w.manual = false
+	m.updateDPI(h, w)
 	if !m.wantsBorderless(w) {
 		m.showTitleBar(h, w, "kept")
 		return
@@ -444,6 +497,7 @@ func (m *manager) handleSnapped(h uintptr, w *window, bits uint64) {
 	}
 	zone, ok := m.zoneRect(h, bits)
 	if !ok {
+		m.showTitleBar(h, w, "zone no longer available")
 		return
 	}
 	framed := style&frameStyles != 0
@@ -461,6 +515,47 @@ func (m *manager) handleSnapped(h uintptr, w *window, bits uint64) {
 		// Without a resize border FancyZones only moves the window; resize it to the zone.
 		m.fit(h, w, zone)
 	}
+	if !w.broken && !w.gaveUp {
+		w.placed = windowRect(h)
+	}
+}
+
+func (m *manager) updateDPI(h uintptr, w *window) {
+	dpi := monitorDPI(monitorFromWindow(h))
+	if dpi == w.dpi {
+		return
+	}
+	w.dpi = dpi
+	w.refit = w.bits != 0
+	w.changes, w.gaveUp = nil, false
+	if w.ownBar > 0 {
+		m.measureOwnBar(h, w)
+	}
+}
+
+// Fullscreen belongs to the app. In particular, restoring a stripped frame or
+// leaving a clipping region here would break its fullscreen mode.
+func (m *manager) leaveFullscreen(h uintptr, w *window) bool {
+	mi, ok := monitorInfo(monitorFromWindow(h))
+	style, bounds := windowStyle(h), windowRect(h)
+	if !ok || !appFullscreen(style, bounds, mi.Monitor, w.placed, w.origStyle, w.stripped) {
+		return false
+	}
+	if w.hidden {
+		m.unhide(h, w)
+	}
+	// A frame restored on leaving fullscreen is not an app refusing our change.
+	w.strippedAt = time.Time{}
+	return true
+}
+
+func appFullscreen(style uint32, bounds, screen, placed rect, original uint32, stripped bool) bool {
+	if style&frameStyles != 0 || !nearRect(bounds, screen, 1) {
+		return false
+	}
+	// A borderless zone may itself fill the monitor; don't mistake our own fit
+	// for a fullscreen transition unless the app also changed its popup style.
+	return !stripped || bounds != placed || (style^original)&wsPopup != 0
 }
 
 // fixedSizeRect decides how big a fixed-size window gets when its frame comes off. It keeps
@@ -468,7 +563,7 @@ func (m *manager) handleSnapped(h uintptr, w *window, bits uint64) {
 // title bar and Windows' maximum window height shave up to a few dozen pixels off a game
 // that runs at exactly the zone size, so it gets the full zone back.
 func fixedSizeRect(h uintptr, zone rect) rect {
-	const tolerance = 64
+	tolerance := scaleForWindow(h, 64)
 	cw, ch := clientSize(h)
 	if cw <= zone.width() && ch <= zone.height() && zone.width()-cw <= tolerance && zone.height()-ch <= tolerance {
 		return zone
@@ -482,6 +577,10 @@ func fixedSizeRect(h uintptr, zone rect) rect {
 func (m *manager) noteRefusal(h uintptr, w *window) {
 	if time.Since(w.strippedAt) > refusalWindow {
 		w.refusals = 0
+		// A later frame change can also be a new game resolution. Save that
+		// window on the next strip instead of restoring its obsolete size.
+		w.stripped = false
+		removeProp(h, propSavedStyle)
 		return
 	}
 	w.refusals++
@@ -707,6 +806,7 @@ func (m *manager) strip(h uintptr, w *window, target rect) {
 		return
 	}
 	log.Printf("%s: title bar removed, now %v", m.describe(h, w), target)
+	w.placed = windowRect(h)
 }
 
 func (m *manager) fit(h uintptr, w *window, target rect) {
@@ -720,10 +820,14 @@ func (m *manager) fit(h uintptr, w *window, target rect) {
 
 // showTitleBar undoes whatever we did to the window's title bar.
 func (m *manager) showTitleBar(h uintptr, w *window, why string) {
+	if m.leaveFullscreen(h, w) {
+		return
+	}
 	if w.stripped {
 		m.restore(h, w, why)
 	}
 	if !w.hidden {
+		w.placed = rect{}
 		return
 	}
 	// The window moves back first, while it's still clipped, so the title bar doesn't show
@@ -738,6 +842,7 @@ func (m *manager) showTitleBar(h uintptr, w *window, why string) {
 		bringTitleBarBack(h)
 	}
 	m.unhide(h, w)
+	w.placed = rect{}
 	log.Printf("%s: title bar shown again (%s)", m.describe(h, w), why)
 	// A resizable window then fits its zone exactly again, frame included.
 	if bits != 0 && !w.fixedSize {
@@ -777,7 +882,7 @@ func (m *manager) restore(h uintptr, w *window, why string) {
 
 func (m *manager) restoreAll(why string) {
 	for h, w := range m.windows {
-		if isWindow(h) && !isHung(h) {
+		if isWindow(h) && windowPID(h) == w.pid && !isHung(h) {
 			m.showTitleBar(h, w, why)
 		}
 	}
