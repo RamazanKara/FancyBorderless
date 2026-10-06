@@ -13,6 +13,7 @@ var (
 	gdi32    = syscall.NewLazyDLL("gdi32.dll")
 	dwmapi   = syscall.NewLazyDLL("dwmapi.dll")
 	shell32  = syscall.NewLazyDLL("shell32.dll")
+	shcore   = syscall.NewLazyDLL("shcore.dll")
 
 	procAppendMenuW                   = user32.NewProc("AppendMenuW")
 	procChangeWindowMessageFilterEx   = user32.NewProc("ChangeWindowMessageFilterEx")
@@ -87,6 +88,7 @@ var (
 
 	procDwmGetWindowAttribute = dwmapi.NewProc("DwmGetWindowAttribute")
 	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
+	procGetDpiForMonitor      = shcore.NewProc("GetDpiForMonitor")
 
 	procShellExecuteW    = shell32.NewProc("ShellExecuteW")
 	procShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
@@ -133,6 +135,7 @@ const (
 	processQueryLimitedInformation = 0x1000
 
 	eventSystemMoveSizeEnd    = 0x000B
+	eventObjectDestroy        = 0x8001
 	eventObjectShow           = 0x8002
 	eventObjectLocationChange = 0x800B
 	winEventOutOfContext      = 0x0000
@@ -146,6 +149,7 @@ const (
 	wmSettingChange = 0x001A
 	wmContextMenu   = 0x007B
 	wmDisplayChange = 0x007E
+	wmDpiChanged    = 0x02E0
 	wmNcHitTest     = 0x0084
 	wmTimer         = 0x0113
 	wmHotkey        = 0x0312
@@ -543,11 +547,26 @@ func isCloaked(h uintptr) bool {
 
 // scaleForWindow converts a size in pixels at 100 % scaling to the window's monitor.
 func scaleForWindow(h uintptr, px int32) int32 {
-	dpi, _, _ := procGetDpiForWindow.Call(h)
-	if dpi == 0 {
-		return px
+	return px * int32(monitorDPI(monitorFromWindow(h))) / 96
+}
+
+func monitorDPI(hmon uintptr) uint32 {
+	var x, y uint32
+	if hr, _, _ := procGetDpiForMonitor.Call(hmon, 0, uintptr(unsafe.Pointer(&x)), uintptr(unsafe.Pointer(&y))); hr != 0 || x == 0 {
+		return 96
 	}
-	return px * int32(dpi) / 96
+	return x
+}
+
+// DPI changes on a secondary monitor need not reach our hidden window.
+func monitorStamp() string {
+	stamp := ""
+	for _, hmon := range allMonitors() {
+		if mi, ok := monitorInfo(hmon); ok {
+			stamp += fmt.Sprintf("%x:%v:%v:%d;", hmon, mi.Monitor, mi.Work, monitorDPI(hmon))
+		}
+	}
+	return stamp
 }
 
 func setWindowPos(h uintptr, r rect, flags uintptr) error {

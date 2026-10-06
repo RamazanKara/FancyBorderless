@@ -222,7 +222,7 @@ func wndProc(h, msg, wParam, lParam uintptr) uintptr {
 	case wmTrayIcon:
 		app.onTrayMessage(uint32(lParam))
 		return 0
-	case wmDisplayChange:
+	case wmDisplayChange, wmDpiChanged:
 		app.scheduleRefit()
 	case wmSettingChange:
 		if wParam == spiSetWorkArea {
