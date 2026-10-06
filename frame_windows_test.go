@@ -27,6 +27,13 @@ func TestFrameWindowHost(t *testing.T) {
 	defer runtime.UnlockOSThread()
 	procSetProcessDpiAwarenessContext.Call(dpiAwarenessPerMonitorV2)
 	callback := syscall.NewCallback(func(h, msg, wp uintptr, lp unsafe.Pointer) uintptr {
+		if msg == wmNcHitTest && mode == "custom_hittest" {
+			y := int32(int16(uintptr(lp)>>16)) - visibleRect(h).Top
+			if y >= 0 && y < scaleForWindow(h, 32) {
+				return htCaption
+			}
+			return 1 // HTCLIENT
+		}
 		if msg == 0x83 && strings.HasPrefix(mode, "custom") { // WM_NCCALCSIZE
 			// Own title bar, with the usual resize margins on the other three sides.
 			r := (*rect)(lp)

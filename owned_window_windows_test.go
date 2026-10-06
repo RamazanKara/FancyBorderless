@@ -89,6 +89,7 @@ func TestOwnedContentSharesZoneMarker(t *testing.T) {
 	if m.zoneBits(owner) != 2 {
 		t.Fatal("outer frame did not follow a zone change")
 	}
+	m.layouts[monitorFromWindow(owner)].zones[0] = visibleRect(owner)
 	setProp(owner, propZones, 1)
 	if m.zoneBits(owner) != 1 {
 		t.Fatal("the frame's own zone should take precedence")
