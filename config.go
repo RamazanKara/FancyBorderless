@@ -51,6 +51,11 @@ func loadConfig() (config, error) {
 	if err != nil {
 		return defaultConfig(), err
 	}
+	if c.ToggleTitleBarHotkey != "" {
+		if _, _, err := parseHotkey(c.ToggleTitleBarHotkey); err != nil {
+			return defaultConfig(), fmt.Errorf("%s: toggleTitleBarHotkey: %w", configPath, err)
+		}
+	}
 	if c.KeepTitleBarApps == nil {
 		c.KeepTitleBarApps = []string{}
 	}

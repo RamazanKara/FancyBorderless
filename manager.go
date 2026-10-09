@@ -963,6 +963,7 @@ func (m *manager) setEnabled(on bool) {
 // setKeep remembers whether an app keeps its title bar and applies it to its open windows.
 // Only a choice that differs from the app's default is written down, so the lists stay short.
 func (m *manager) setKeep(exeName string, keep bool) {
+	exeName = displayName(exeName) + ".exe"
 	isApp := func(e string) bool { return matchesApp([]string{e}, exeName) }
 	m.cfg.KeepTitleBarApps = slices.DeleteFunc(m.cfg.KeepTitleBarApps, isApp)
 	m.cfg.RemoveTitleBarApps = slices.DeleteFunc(m.cfg.RemoveTitleBarApps, isApp)
